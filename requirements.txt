@@ -1,9 +1,18 @@
-# 阶段二/三依赖（Python 3.13 实测可用）
+# 运行时（Python 3.13 实测）
+fastapi==0.162.0
+uvicorn==0.54.0
+paho-mqtt==2.2.0
+
+# Agent 编排
 langgraph==1.2.20
 langgraph-checkpoint==4.3.1
 
-# RAG
+# 规程检索
 sentence-transformers==6.2.0
 faiss-cpu==1.15.1
 
+# 验收脚本（P5 的 WS 客户端）
+websockets>=13
+
 # 说明：Ollama 不是 pip 依赖，需要单独安装二进制；模型 qwen2.5:7b 由 ollama pull 拉取。
+# 国内网络建议：pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
