@@ -74,6 +74,11 @@ export function StatusBar({
             分析引擎：{analyzer.text}
             {status?.model && status.analyzer === "ollama" ? <span className="text-slate-500">· {status.model}</span> : null}
           </Pill>
+          {status?.checkpointer ? (
+            <Pill tone={status.checkpointer === "sqlite" ? "ok" : "warn"}>
+              断点：{status.checkpointer === "sqlite" ? "SQLite 持久化" : "内存（重启丢失）"}
+            </Pill>
+          ) : null}
         </div>
 
         <div className="ml-auto flex items-center gap-4 text-sm">

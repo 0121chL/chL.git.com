@@ -85,7 +85,25 @@ try {
 
   await page.screenshot({ path: `${SHOT_DIR}/p4-analysis.png` });
 
-  // 3) 点批准
+  // 3) 填写审批人 / 意见，再点批准
+  await page.evaluate(() => {
+    const setValue = (el, value) => {
+      if (!el) return;
+      const setter = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(el),
+        "value",
+      ).set;
+      setter.call(el, value);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    setValue(document.querySelector('input[placeholder="姓名 / 工号"]'), "张工");
+    setValue(
+      document.querySelector('textarea[placeholder^="例如"]'),
+      "同意降载，30 分钟后复测 ch4",
+    );
+  });
+  console.log("[browser] ✓ 填写审批人：张工");
+
   const clicked = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll("button"));
     const approve = buttons.find((b) => b.textContent?.trim() === "批准" && !b.disabled);
@@ -96,16 +114,16 @@ try {
   if (!clicked) throw new Error("找不到可用的「批准」按钮");
   console.log("[browser] ✓ 点击批准");
 
-  // 4) 工单表出现该事件
+  // 4) 工单表出现该事件，并且记录了审批人
   await page.waitForFunction(
     (id) => {
       const table = document.querySelector("table");
-      return Boolean(table && table.innerText.includes(id));
+      return Boolean(table && table.innerText.includes(id) && table.innerText.includes("张工"));
     },
     { timeout: 30000 },
     eventId,
   );
-  console.log("[browser] ✓ 工单出现在底部列表");
+  console.log("[browser] ✓ 工单出现在底部列表，审批人已落库");
 
   await page.screenshot({ path: `${SHOT_DIR}/p4-approved.png` });
   const stats = await page.evaluate(() => ({

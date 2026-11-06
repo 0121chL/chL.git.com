@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import type { EventRecord, RiskLevel } from "@/lib/types";
 
 const RISK: Record<RiskLevel, { label: string; cls: string }> = {
@@ -24,8 +26,11 @@ export function AnalysisPanel({
 }: {
   record: EventRecord | null;
   busy: boolean;
-  onDecide: (decision: "approve" | "reject") => void;
+  onDecide: (decision: "approve" | "reject", approver: string, comment: string) => void;
 }) {
+  const [approver, setApprover] = useState("值班调度员");
+  const [comment, setComment] = useState("");
+
   if (!record) {
     return (
       <section className="flex h-full items-center justify-center rounded-lg border border-dashed border-slate-300 bg-white p-6">
@@ -99,11 +104,37 @@ export function AnalysisPanel({
       </div>
 
       <footer className="border-t border-slate-200 bg-slate-50 px-4 py-3">
-        <div className="flex items-center gap-2">
+        <div className="grid gap-2 sm:grid-cols-[170px_1fr]">
+          <label className="text-[11px] text-slate-500">
+            审批人
+            <input
+              value={approver}
+              onChange={(e) => setApprover(e.target.value)}
+              disabled={!pending || busy}
+              maxLength={60}
+              className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-800 disabled:bg-slate-100"
+              placeholder="姓名 / 工号"
+            />
+          </label>
+          <label className="text-[11px] text-slate-500">
+            审批意见（可选，与决定一并落库）
+            <textarea
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+              disabled={!pending || busy}
+              maxLength={500}
+              rows={2}
+              className="mt-1 w-full resize-none rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-800 disabled:bg-slate-100"
+              placeholder="例如：同意降载，30 分钟后复测 ch4"
+            />
+          </label>
+        </div>
+
+        <div className="mt-2 flex items-center gap-2">
           <button
             type="button"
             disabled={!pending || busy}
-            onClick={() => onDecide("approve")}
+            onClick={() => onDecide("approve", approver, comment)}
             className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300"
           >
             批准
@@ -111,7 +142,7 @@ export function AnalysisPanel({
           <button
             type="button"
             disabled={!pending || busy}
-            onClick={() => onDecide("reject")}
+            onClick={() => onDecide("reject", approver, comment)}
             className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-400"
           >
             拒绝
@@ -120,7 +151,7 @@ export function AnalysisPanel({
             {busy
               ? "提交中…"
               : record.status === "approved"
-                ? "已批准，工单已由后端写入"
+                ? "已批准，工单与审批记录均由后端写入"
                 : record.status === "rejected"
                   ? "已拒绝，未生成工单"
                   : "审批通过后由后端落库，前端不自行添加记录"}

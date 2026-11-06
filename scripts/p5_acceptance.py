@@ -99,18 +99,26 @@ def test_rest_and_idempotency() -> bool:
     analysis = (record or {}).get("analysis") or {}
     check(bool(analysis.get("regulation_basis")), "分析含 regulation_basis", str(analysis.get("regulation_basis"))[:40])
 
-    status, body = request("POST", f"/approve/{eid}")
+    status, body = request(
+        "POST",
+        f"/approve/{eid}",
+        {"approver": "测试审批人", "comment": "自动化验收：同意降载"},
+    )
     check(status == 200, "POST /approve 返回 200", str(status))
     first = body.get("work_order") or {}
     check(bool(first.get("id")), "返回工单 JSON", f"wo={first.get('id')}")
+    check(first.get("approver") == "测试审批人", "工单带审批人", str(first.get("approver")))
+    check(first.get("approval_comment") == "自动化验收：同意降载", "工单带审批意见", str(first.get("approval_comment")))
+    check(bool(first.get("decided_at")), "工单带审批时间", str(first.get("decided_at")))
 
     # 关键：重复批准
     print("\n--- B. 同一 event_id 重复 /approve ---")
-    status, body = request("POST", f"/approve/{eid}")
+    status, body = request("POST", f"/approve/{eid}", {"approver": "另一个人"})
     second = body.get("work_order") or {}
     check(status == 200, "重复批准仍返回 200（幂等）", str(status))
     check(body.get("duplicate") is True, "响应标记 duplicate=true", str(body.get("duplicate")))
     check(second.get("id") == first.get("id"), "返回同一张工单（id 相同）", f"{first.get('id')} vs {second.get('id')}")
+    check(second.get("approver") == "测试审批人", "审批人不会被第二次调用覆盖", str(second.get("approver")))
 
     status, body = request("POST", f"/approve/{eid}")
     check((body.get("work_order") or {}).get("id") == first.get("id"), "第三次批准仍不新建")
@@ -130,8 +138,11 @@ def test_reject() -> bool:
     if not check(record is not None, "待审批就绪"):
         return False
 
-    status, body = request("POST", f"/reject/{eid}")
+    status, body = request(
+        "POST", f"/reject/{eid}", {"approver": "测试审批人", "comment": "自动化验收：现场已恢复"}
+    )
     check(status == 200 and body.get("decision") == "reject", "POST /reject 成功", str(body.get("decision")))
+    check(body.get("approver") == "测试审批人", "驳回也记录审批人", str(body.get("approver")))
 
     status, body = request("POST", f"/reject/{eid}")
     check(status == 409, "重复驳回返回 409（状态机已离开审批点）", str(status))
@@ -180,6 +191,7 @@ def main() -> int:
     try:
         status, body = request("GET", "/api/status", timeout=5)
         print(f"backend: {status} analyzer={body.get('analyzer')} counts={body.get('counts')}")
+        check(body.get("checkpointer") == "sqlite", "断点持久化 = SQLite（重启可恢复）", str(body.get("checkpointer")))
     except Exception as exc:  # noqa: BLE001
         print(f"后端不可用：{exc}")
         return 2

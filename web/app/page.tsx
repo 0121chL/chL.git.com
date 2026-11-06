@@ -135,13 +135,13 @@ export default function DashboardPage() {
   );
 
   const decide = useCallback(
-    async (decision: "approve" | "reject") => {
+    async (decision: "approve" | "reject", approver: string, comment: string) => {
       if (!selected) return;
       setBusyId(selected.event_id);
       setError(null);
       try {
         // 只提交请求；工单必须由后端落库后经 SSE 推回来
-        await postApproval(selected.event_id, decision);
+        await postApproval(selected.event_id, decision, { approver, comment });
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {

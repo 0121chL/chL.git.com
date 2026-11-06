@@ -4,16 +4,19 @@
 无云服务、无 API Key。
 
 ```
-F:\deepseek\wenjian\safe-monitor-agent
-├─ server.py              FastAPI + SSE + 审批恢复
-├─ agent_graph.py         LangGraph：analyze → interrupt → 批准/驳回
-├─ analyzer.py            检索 + Ollama + 接地校验
-├─ regulation_store.py    16 条模拟规程 + FAISS + BM25
-├─ offline_analyzer.py    无 Ollama 时的模板兜底
-├─ db.py                  SQLite：events / work_orders / audit_log
-├─ mqtt_bridge.py         line1/events 订阅
-├─ web/                   Next.js 15 App Router + Tailwind
-├─ scripts/               inject_event.py / e2e_check.py / reset_demo.py
+safe-monitor-agent
+├─ backend_server.py       FastAPI：REST + WS + SSE，审批恢复与幂等
+├─ server.py               等价入口（兼容旧命令）
+├─ agent_graph.py          LangGraph：analyze → interrupt → 批准/驳回
+├─ analyzer.py             检索 + Ollama + 接地校验
+├─ regulation_store.py     16 条模拟规程 + FAISS + BM25
+├─ offline_analyzer.py     无 Ollama 时的模板兜底
+├─ db.py                   SQLite：events / work_orders / approvals / audit_log
+├─ rule_engine.py          阈值/趋势规则 → events.jsonl + POST /events
+├─ sensor_simulator.py     正常模式 / --inject ch4_rise|temp_spike
+├─ mqtt_bridge.py          line1/events 订阅
+├─ web/                    Next.js 15 App Router + Tailwind
+├─ scripts/                p5_acceptance / e2e_check / inject_event / reset_demo
 └─ config/mosquitto.conf
 ```
 
@@ -24,31 +27,35 @@ F:\deepseek\wenjian\safe-monitor-agent
 | P2 | LangGraph + 人工审批暂停点 | `README-P2.md` | `python test_approval_flow.py`（28 项） |
 | P3 | Ollama + 规程检索 + 接地校验 | `README-P3.md` | `python verify_p3.py`（13 项） |
 | P4 | SSE + Next.js 双卡片看板 | `README-P4.md` | `python scripts/e2e_check.py` / `web/scripts/browser_check.mjs` |
-| P5 | 集成联调 + 一键演示 | `README-DEMO.md` | `python scripts/p5_acceptance.py`（19 项，含幂等/WS） |
+| P5 | 集成联调 + 一键演示 | `README-DEMO.md` | `python scripts/p5_acceptance.py`（25 项） |
+| P6 | 审批留痕 + 断点持久化 | `README-DEMO.md` §3.5/§3.6 | 同上 + 重启恢复手工验收 |
 
-## 一键演示（P5）
+### P6 两个改动
+
+1. **审批留痕**：`POST /approve|/reject/{event_id}` 接受 `approver`、`comment`，写入 `approvals`
+   （`event_id` 唯一），工单列表 join 出「审批人 / 审批时间」；重复批准不会覆盖第一审批人。
+2. **断点持久化**：`SqliteSaver` 存 `data/checkpoints.db`，后端重启后仍可批准原待审批事件
+   （`/api/status` 的 `checkpointer` 字段可查）。
+
+## 一键演示
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\start_demo.ps1   # 体检 + 起 5 个服务
 .\demo_trigger.ps1                                          # 注入 ch4_rise
-# 浏览器 http://localhost:3000 → 点批准 → 工单入表
+# 浏览器 http://localhost:3000 → 填审批人/意见 → 点批准 → 工单入表
 .\stop_demo.ps1                                             # 停止
 ```
 
-新增文件：`backend_server.py`（REST + WS + SSE 兼容）、`rule_engine.py`（阈值/趋势规则 → events.jsonl + POST）、
-`sensor_simulator.py`（正常模式 / `--inject ch4_rise|temp_spike`）、`start_demo.ps1`、`stop_demo.ps1`、
-`demo_trigger.ps1` / `demo_trigger.sh`。`server.py` 仍可用（等价入口）。
-
-## 快速启动
+## 手工启动（分 4 个终端）
 
 ```powershell
 cd F:\deepseek\wenjian\safe-monitor-agent
 
-# 1. MQTT（程序已装为服务；手动启动用）
+# 1. MQTT（已装为 Windows 服务；手动启动用）
 & "C:\Program Files\mosquitto\mosquitto.exe" -c config\mosquitto.conf -v
 
 # 2. 后端
-python server.py
+python backend_server.py
 
 # 3. 前端
 $env:PATH = "F:\deepseek\wenjian\safe-monitor-agent\.tools\node-v22.20.0-win-x64;" + $env:PATH
@@ -57,8 +64,6 @@ cd web; npm run dev
 # 4. 注入演示事件
 python scripts\inject_event.py --scenario gas_surge
 ```
-
-浏览器打开 <http://localhost:3000>：事件卡 → 分析卡 → 点批准 → 工单入表。
 
 ## 环境备注（本机）
 

@@ -49,6 +49,9 @@ export interface WorkOrder {
   content: Record<string, unknown>;
   status: string;
   created_at: string;
+  approver?: string | null;
+  approval_comment?: string | null;
+  decided_at?: string | null;
 }
 
 export interface StatusPayload {
@@ -64,6 +67,7 @@ export interface StatusPayload {
   model: string;
   counts: { events: number; pending: number; work_orders: number };
   subscribers?: number;
+  checkpointer?: string;
 }
 
 export type StreamMessage =

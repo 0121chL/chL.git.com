@@ -2,6 +2,11 @@
 
 从零到「事件卡片 → Agent 分析卡片 → 点击批准 → 工单出现」的完整序列，含每步预期输出与常见失败原因。
 
+> P6 增补（已包含在下面的流程里）：
+> 1. **审批留痕** —— 批准/驳回时填写审批人与意见，写入 `approvals` 表，工单列表 join 显示；
+> 2. **断点持久化** —— LangGraph 状态存 `data/checkpoints.db`，后端重启后仍可批准，不再 409。
+> 界面顶部相应多出「断点：SQLite 持久化」徽章，工单表多出「审批人 / 审批时间」两列。
+
 ---
 
 ## 0. 前置条件（一次性）
@@ -126,8 +131,65 @@ duplicate=True  work_order_id=3
 `p5_acceptance.py` 实测输出：
 
 ```
-P5 OK: 19/19 条断言通过（含重复批准幂等、WS 三类推送）
+P5 OK: 25/25 条断言通过（含重复批准幂等、审批留痕、WS 三类推送）
 ```
+
+---
+
+## 3.5 审批留痕（P6）
+
+界面上在「批准 / 拒绝」上方填 **审批人**（默认「值班调度员」）与 **审批意见**（可选），提交后落库。
+
+```powershell
+$eid = (Get-Content events.jsonl -Tail 1 | ConvertFrom-Json).event_id
+$body = @{ approver = "张工"; comment = "同意降载，30 分钟后复测" } | ConvertTo-Json
+Invoke-RestMethod -Method Post "http://127.0.0.1:8000/approve/$eid" -Body $body -ContentType "application/json"
+```
+
+预期返回里 `work_order.approver = 张工`、`approval_comment = 同意降载，30 分钟后复测`、`decided_at` 非空。
+数据库：
+
+```powershell
+python -c "import db; print(db.get_approval(db.DEFAULT_DB_PATH, '<event_id>'))"
+```
+
+```
+{'event_id': '...', 'decision': 'approved', 'approver': '张工',
+ 'comment': '同意降载，30 分钟后复测', 'decided_at': '2026-11-06T14:51:04Z', 'work_order_id': 9}
+```
+
+重复批准不会覆盖第一审批人（`p5_acceptance` 里有这条断言）。
+
+---
+
+## 3.6 重启恢复（P6）
+
+验证「后端重启后，原来停在 interrupt 的事件仍能批准」：
+
+```powershell
+# 1) 造一条待审批事件，记下 event_id
+$ev = @{ event_id = "evt-restart-demo"; sensor = "ch4"; rule_id = "R-CH4-RISE"; event_type = "gas_surge";
+         severity = "high"; triggered_at = (Get-Date).ToString("o");
+         observed = @{ value = 1.6; unit = "%"; threshold = 1.0 } } | ConvertTo-Json
+Invoke-RestMethod -Method Post "http://127.0.0.1:8000/events" -Body $ev -ContentType "application/json"
+
+# 2) 杀掉后端再启动
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+  Where-Object { $_.CommandLine -like "*backend_server.py*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+python backend_server.py
+
+# 3) 重启后直接批准（不重新投递事件）
+Invoke-RestMethod -Method Post "http://127.0.0.1:8000/approve/evt-restart-demo"
+```
+
+预期：第 3 步返回 200 且生成工单；`/events/evt-restart-demo` 在重启后是 404（内存字典清空），
+但检查点仍在 `data/checkpoints.db`，所以能恢复。实测：
+
+```
+approve after restart -> ok=True duplicate=False work_order=10 approver=李工
+```
+
+若这里返回 409，说明 `data/checkpoints.db` 被删了或用了 `InMemorySaver`（检查 `/api/status` 的 `checkpointer`）。
 
 ---
 
@@ -140,7 +202,8 @@ P5 OK: 19/19 条断言通过（含重复批准幂等、WS 三类推送）
 | 事件卡片一直不出现 | rule_engine 挂了 / 没订阅上 | `data\logs\rule_engine.err`；确认 `sensor_simulator.py --inject ch4_rise` 与 rule_engine 连的是同一 broker |
 | `analysis_error` / 顶部红条 | Ollama 未启动但被选为引擎 | 重启后端；或 `ollama serve` 后 `ollama pull qwen2.5:7b` |
 | 分析文本带 `[离线模板]` | 没装 Ollama | 正常降级；要真实模型见 README-P3 |
-| `HTTP 409 该事件不在待审批状态` | 重复批准或后端重启后内存中断点丢失 | 演示前重启后端；这是 `InMemorySaver` 的已知限制 |
+| `HTTP 409 该事件不在待审批状态` | 该事件已批准过、或已驳回 | 换一条事件；已批准的直接看工单表（重复批准本身是幂等的，返回旧工单） |
+| 工单没有审批人 | 用的是 P6 之前写入的历史数据 | 新工单才会写 `approvals`；历史行为空是正常的 |
 | `powershell 无法加载文件 … 未数字签名` | 执行策略 | 始终用 `powershell -ExecutionPolicy Bypass -File .\start_demo.ps1` |
 | `next: command not found` | PATH 没有便携版 Node | 脚本已自动注入 `.tools\node-*`；手工执行时先 `$env:PATH = "...\.tools\node-v22.20.0-win-x64;" + $env:PATH` |
 | 页面空白 / 一直「实时流断开」 | 后端 8000 没起 | `curl http://127.0.0.1:8000/api/status`；看 `data\logs\backend.err` |

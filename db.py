@@ -53,6 +53,19 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_received ON events(received_at DESC);
+
+-- 人工审批留痕：谁、什么时候、以什么理由批/驳
+CREATE TABLE IF NOT EXISTS approvals (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id      TEXT    NOT NULL UNIQUE,
+    decision      TEXT    NOT NULL,
+    approver      TEXT    NOT NULL,
+    comment       TEXT,
+    decided_at    TEXT    NOT NULL,
+    work_order_id INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_approvals_event ON approvals(event_id);
 """
 
 
@@ -267,8 +280,13 @@ def count_events(db_path: str | Path | None, status: str | None = None) -> int:
 def list_work_orders(db_path: str | Path | None, limit: int = 50) -> list[dict[str, Any]]:
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, event_id, content, status, created_at FROM work_orders "
-            "ORDER BY id DESC LIMIT ?",
+            """
+            SELECT w.id, w.event_id, w.content, w.status, w.created_at,
+                   a.approver, a.comment AS approval_comment, a.decided_at
+            FROM work_orders w
+            LEFT JOIN approvals a ON a.event_id = w.event_id
+            ORDER BY w.id DESC LIMIT ?
+            """,
             (limit,),
         ).fetchall()
     result = []
@@ -282,9 +300,41 @@ def list_work_orders(db_path: str | Path | None, limit: int = 50) -> list[dict[s
     return result
 
 
+# --------------------------------------------------------------------------- #
+# approvals（谁批的、什么时候、什么理由）
+# --------------------------------------------------------------------------- #
+def record_approval(
+    db_path: str | Path | None,
+    event_id: str,
+    decision: str,
+    approver: str,
+    comment: str | None = None,
+    work_order_id: int | None = None,
+) -> dict[str, Any]:
+    """一个事件只保留一条终态审批记录；重复调用返回既有记录。"""
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO approvals (event_id, decision, approver, comment, decided_at, work_order_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id) DO NOTHING
+            """,
+            (event_id, decision, approver, comment, utcnow(), work_order_id),
+        )
+        row = conn.execute("SELECT * FROM approvals WHERE event_id = ?", (event_id,)).fetchone()
+    return dict(row)
+
+
+def get_approval(db_path: str | Path | None, event_id: str) -> dict[str, Any] | None:
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM approvals WHERE event_id = ?", (event_id,)).fetchone()
+    return dict(row) if row else None
+
+
 def reset_all(db_path: str | Path | None) -> None:
-    """仅供验收脚本使用：清空两张表，让记录数断言可复现。"""
+    """仅供验收脚本使用：清空业务表，让记录数断言可复现。"""
     with connect(db_path) as conn:
         conn.execute("DELETE FROM work_orders")
         conn.execute("DELETE FROM audit_log")
-        conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('work_orders', 'audit_log')")
+        conn.execute("DELETE FROM approvals")
+        conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('work_orders', 'audit_log', 'approvals')")

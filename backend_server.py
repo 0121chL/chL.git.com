@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import threading
 import uuid
 from contextlib import asynccontextmanager
@@ -29,6 +30,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from pydantic import BaseModel
 
@@ -101,6 +103,7 @@ def status_payload() -> dict[str, Any]:
         "counts": counts(),
         "subscribers": BUS.subscriber_count + WSBUS.subscriber_count,
         "memory_events": len(EVENTS),
+        "checkpointer": STATE.get("checkpointer", "memory"),
     }
 
 
@@ -113,6 +116,11 @@ def _work_order_payload(row: dict[str, Any] | None) -> dict[str, Any] | None:
             payload["content"] = json.loads(payload["content"])
         except json.JSONDecodeError:
             pass
+    approval = db.get_approval(DB_PATH, payload.get("event_id", ""))
+    if approval:
+        payload["approver"] = approval.get("approver")
+        payload["approval_comment"] = approval.get("comment")
+        payload["decided_at"] = approval.get("decided_at")
     return payload
 
 
@@ -206,13 +214,26 @@ def _mark(event_id: str, **fields: Any) -> None:
 # 审批（幂等）
 # --------------------------------------------------------------------------- #
 class DecisionBody(BaseModel):
+    approver: str | None = None
     comment: str | None = None
 
 
-def _decide(event_id: str, decision: str) -> dict[str, Any]:
+def _normalize_approver(value: str | None) -> str:
+    name = (value or "").strip()
+    return name[:60] if name else "未署名"
+
+
+def _decide(
+    event_id: str,
+    decision: str,
+    approver: str | None = None,
+    comment: str | None = None,
+) -> dict[str, Any]:
     """approve/reject 的公共实现；同一 event_id 重复调用不会产生第二张工单。"""
     graph = STATE["app"]
     config = ag.thread_config(event_id)
+    who = _normalize_approver(approver)
+    note = (comment or "").strip()[:500] or None
 
     with event_lock(event_id), PIPELINE_LOCK:
         existing = db.get_work_order(DB_PATH, event_id)
@@ -224,6 +245,7 @@ def _decide(event_id: str, decision: str) -> dict[str, Any]:
                 "decision": "approve",
                 "event_id": event_id,
                 "thread_id": event_id,
+                "approver": (db.get_approval(DB_PATH, event_id) or {}).get("approver"),
                 "work_order": _work_order_payload(existing),
             }
 
@@ -246,12 +268,21 @@ def _decide(event_id: str, decision: str) -> dict[str, Any]:
 
         if decision == "approve":
             row = db.get_work_order(DB_PATH, event_id)
+            approval = db.record_approval(
+                DB_PATH,
+                event_id,
+                decision="approved",
+                approver=who,
+                comment=note,
+                work_order_id=row["id"] if row else None,
+            )
             _mark(event_id, status="approved", work_order_id=row["id"] if row else None)
             broadcast(
                 {
                     "type": "work_order",
                     "event_id": event_id,
                     "work_order": _work_order_payload(row),
+                    "approval": approval,
                     "counts": counts(),
                 }
             )
@@ -261,17 +292,36 @@ def _decide(event_id: str, decision: str) -> dict[str, Any]:
                 "decision": "approve",
                 "event_id": event_id,
                 "thread_id": event_id,
+                "approver": who,
+                "comment": note,
                 "work_order": _work_order_payload(row),
             }
 
+        approval = db.record_approval(
+            DB_PATH,
+            event_id,
+            decision="rejected",
+            approver=who,
+            comment=note,
+            work_order_id=None,
+        )
         _mark(event_id, status="rejected")
-        broadcast({"type": "rejected", "event_id": event_id, "counts": counts()})
+        broadcast(
+            {
+                "type": "rejected",
+                "event_id": event_id,
+                "approval": approval,
+                "counts": counts(),
+            }
+        )
         return {
             "ok": True,
             "duplicate": False,
             "decision": "reject",
             "event_id": event_id,
             "thread_id": event_id,
+            "approver": who,
+            "comment": note,
             "work_order": None,
             "state": result.get("approval_status"),
         }
@@ -289,12 +339,23 @@ async def lifespan(_: FastAPI):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     source, model, analyze_fn = pick_analyzer()
+
+    # 断点持久化：进程重启后仍能从 interrupt() 处恢复审批
+    ckpt_path = os.environ.get("CHECKPOINT_DB") or str(Path(DB_PATH).with_name("checkpoints.db"))
+    Path(ckpt_path).parent.mkdir(parents=True, exist_ok=True)
+    ckpt_conn = sqlite3.connect(ckpt_path, check_same_thread=False)
+    ckpt_conn.execute("PRAGMA journal_mode = WAL")
+    checkpointer = SqliteSaver(ckpt_conn)
+
     STATE.update(
         {
-            "app": ag.build_app(DB_PATH, analyze_fn=analyze_fn),
+            "app": ag.build_app(DB_PATH, checkpointer=checkpointer, analyze_fn=analyze_fn),
             "analyzer_source": source,
             "analyzer_model": model,
             "analyze": analyze_fn,
+            "checkpointer": "sqlite",
+            "checkpoint_db": ckpt_path,
+            "ckpt_conn": ckpt_conn,
         }
     )
 
@@ -356,12 +417,14 @@ def post_event(event: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/approve/{event_id}")
 def approve(event_id: str, body: DecisionBody | None = None) -> dict[str, Any]:
-    return _decide(event_id, "approve")
+    body = body or DecisionBody()
+    return _decide(event_id, "approve", body.approver, body.comment)
 
 
 @app.post("/reject/{event_id}")
 def reject(event_id: str, body: DecisionBody | None = None) -> dict[str, Any]:
-    return _decide(event_id, "reject")
+    body = body or DecisionBody()
+    return _decide(event_id, "reject", body.approver, body.comment)
 
 
 @app.get("/work_orders")
@@ -458,11 +521,14 @@ async def api_stream() -> StreamingResponse:
 
 @app.post("/api/approvals/{event_id}")
 def api_approval(event_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-    decision = str((body or {}).get("decision", "approve")).strip().lower()
+    payload = body or {}
+    decision = str(payload.get("decision", "approve")).strip().lower()
+    approver = payload.get("approver")
+    comment = payload.get("comment")
     if decision in {"approve", "approved", "批准", "同意"}:
-        return _decide(event_id, "approve")
+        return _decide(event_id, "approve", approver, comment)
     if decision in {"reject", "rejected", "驳回", "拒绝"}:
-        return _decide(event_id, "reject")
+        return _decide(event_id, "reject", approver, comment)
     raise HTTPException(status_code=422, detail=f"非法 decision: {decision!r}")
 
 
