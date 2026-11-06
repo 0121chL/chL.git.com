@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 运行时数据（SQLite、日志、截图产物）
+data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# 本地工具链（便携版 Node，约 483 MB）
+.tools/
+
+# 前端
+web/node_modules/
+web/.next/
+web/out/
+web/.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 环境与密钥
+.env
+.env.local
+
+# 安装包
+*.zip

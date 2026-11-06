@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-100 text-slate-900 antialiased;
+}
+
+/* 演示用：保持克制，只有极轻的 hover 反馈，不做动画 */
+.event-card:hover {
+  @apply border-slate-300;
+}
+
+.event-card[data-selected="true"] {
+  @apply border-slate-900 ring-1 ring-slate-900;
+}

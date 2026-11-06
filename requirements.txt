@@ -1,0 +1,9 @@
+# 阶段二/三依赖（Python 3.13 实测可用）
+langgraph==1.2.20
+langgraph-checkpoint==4.3.1
+
+# RAG
+sentence-transformers==6.2.0
+faiss-cpu==1.15.1
+
+# 说明：Ollama 不是 pip 依赖，需要单独安装二进制；模型 qwen2.5:7b 由 ollama pull 拉取。
