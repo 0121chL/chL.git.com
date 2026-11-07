@@ -15,8 +15,9 @@ langgraph-checkpoint-sqlite==3.1.3
 sentence-transformers==6.2.0
 faiss-cpu==1.15.1
 
-# 验收脚本（P5 的 WS 客户端）
+# 验收脚本（P5 的 WS 客户端 / P8 单元测试）
 websockets>=13
+pytest>=8
 
 # 本地 LLM（无 Ollama 时）：transformers + torch 由 sentence-transformers 带入
 # 说明：Ollama 不是 pip 依赖，需要单独安装二进制；模型 qwen2.5:7b 由 ollama pull 拉取。

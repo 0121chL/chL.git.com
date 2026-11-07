@@ -43,6 +43,8 @@ class AgentState(TypedDict, total=False):
     approval_status: Literal["pending", "approved", "rejected"]
     approval_decision: str
     work_order: dict[str, Any] | None
+    tool_calls: list[str]
+    tool_results: dict[str, Any]
 
 
 # 节点执行计数：用于证明「resume 会重跑 interrupt 之前的代码」，
@@ -66,13 +68,46 @@ def thread_config(event_id: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # 节点
 # --------------------------------------------------------------------------- #
+def plan_node(state: AgentState) -> dict[str, Any]:
+    """决定是否需要调用工具补充上下文（确定性策略，不依赖模型 function calling）。"""
+    _EXECUTIONS["plan_node"] += 1
+    event = state["event"]
+    calls: list[str] = []
+    if event.get("event_type") == "device_offline":
+        calls.append("get_device_status")
+    if event.get("severity") == "high":
+        calls.append("get_recent_events")
+    return {"tool_calls": calls}
+
+
+def route_after_plan(state: AgentState) -> str:
+    return "tools_node" if state.get("tool_calls") else "analyze_node"
+
+
+def make_tools_node(tools_fn: Callable[[dict[str, Any], list[str]], dict[str, Any]] | None):
+    def tools_node(state: AgentState) -> dict[str, Any]:
+        _EXECUTIONS["tools_node"] += 1
+        calls = state.get("tool_calls") or []
+        if not tools_fn or not calls:
+            return {"tool_results": {}}
+        try:
+            results = tools_fn(state["event"], calls)
+        except Exception as exc:  # noqa: BLE001 - 工具失败不能阻断分析
+            results = {"error": f"{type(exc).__name__}: {exc}"}
+        return {"tool_results": results}
+
+    return tools_node
+
+
 def make_analyze_node(db_path: Path, analyze_fn: Callable[[dict[str, Any]], dict[str, Any]]):
     def analyze_node(state: AgentState) -> dict[str, Any]:
         _EXECUTIONS["analyze_node"] += 1
         event = state["event"]
+        context = state.get("tool_results") or {}
+        event_with_context = {**event, "_context": context} if context else event
 
-        # 检索规程 + 调 Ollama（或注入的 mock），失败即抛错、不落任何半成品
-        analysis = analyze_fn(event)
+        # 工具上下文 → 检索 + LLM（或离线模板）；失败即抛错、不落任何半成品
+        analysis = analyze_fn(event_with_context)
 
         # 幂等副作用：重复分析同一事件不会产生第二条审计
         db.upsert_audit(db_path, event["event_id"], "analysis_generated", analysis)
@@ -172,18 +207,31 @@ def build_app(
     db_path: str | Path | None = None,
     checkpointer: Any | None = None,
     analyze_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    tools_fn: Callable[[dict[str, Any], list[str]], dict[str, Any]] | None = None,
 ):
-    """默认用「检索 + Ollama」的 analyzer；测试可注入 mock 分析函数（接口不变）。"""
+    """默认用「检索 + LLM」的 analyzer；测试可注入 mock 分析函数（接口不变）。
+
+    图结构：START → plan → (tools) → analyze → interrupt → 批准/驳回。
+    tools 节点给分析补充设备状态/近期事件等上下文，不改变审批闸门的位置。
+    """
     path = db.init_db(db_path)
     analyze = analyze_fn or analyzer_mod.analyze_event
 
     graph = StateGraph(AgentState)
+    graph.add_node("plan_node", plan_node)
+    graph.add_node("tools_node", make_tools_node(tools_fn))
     graph.add_node("analyze_node", make_analyze_node(path, analyze))
     graph.add_node("human_review_node", make_human_review_node(path))
     graph.add_node("create_work_order_node", make_create_work_order_node(path))
     graph.add_node("reject_node", make_reject_node(path))
 
-    graph.add_edge(START, "analyze_node")
+    graph.add_edge(START, "plan_node")
+    graph.add_conditional_edges(
+        "plan_node",
+        route_after_plan,
+        {"tools_node": "tools_node", "analyze_node": "analyze_node"},
+    )
+    graph.add_edge("tools_node", "analyze_node")
     graph.add_edge("analyze_node", "human_review_node")
     graph.add_conditional_edges(
         "human_review_node",

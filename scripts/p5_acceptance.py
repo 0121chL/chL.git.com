@@ -120,7 +120,7 @@ def test_rest_and_idempotency() -> bool:
     check(second.get("id") == first.get("id"), "返回同一张工单（id 相同）", f"{first.get('id')} vs {second.get('id')}")
     check(second.get("approver") == "测试审批人", "审批人不会被第二次调用覆盖", str(second.get("approver")))
 
-    status, body = request("POST", f"/approve/{eid}")
+    status, body = request("POST", f"/approve/{eid}", {"approver": "测试审批人"})
     check((body.get("work_order") or {}).get("id") == first.get("id"), "第三次批准仍不新建")
 
     _, listing = request("GET", "/work_orders")
@@ -177,7 +177,7 @@ async def test_websocket() -> bool:
                 continue
             seen.add(msg.get("type", ""))
             if msg.get("type") == "analysis":
-                request("POST", f"/approve/{eid}")
+                request("POST", f"/approve/{eid}", {"approver": "测试审批人"})
             if msg.get("type") == "work_order":
                 work_order_id = (msg.get("work_order") or {}).get("id")
 

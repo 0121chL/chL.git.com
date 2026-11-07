@@ -66,6 +66,20 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 
 CREATE INDEX IF NOT EXISTS idx_approvals_event ON approvals(event_id);
+
+-- 原始遥测（用于回放与复盘；按 retention 清理）
+CREATE TABLE IF NOT EXISTS telemetry (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT    NOT NULL,
+    device_id   TEXT    NOT NULL,
+    sensor      TEXT    NOT NULL,
+    value       REAL,
+    unit        TEXT,
+    scenario_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_telemetry_device ON telemetry(device_id, sensor, ts);
+CREATE INDEX IF NOT EXISTS idx_telemetry_ts ON telemetry(ts);
 """
 
 
@@ -329,6 +343,61 @@ def get_approval(db_path: str | Path | None, event_id: str) -> dict[str, Any] | 
     with connect(db_path) as conn:
         row = conn.execute("SELECT * FROM approvals WHERE event_id = ?", (event_id,)).fetchone()
     return dict(row) if row else None
+
+
+# --------------------------------------------------------------------------- #
+# telemetry（原始时序）
+# --------------------------------------------------------------------------- #
+def insert_telemetry(
+    db_path: str | Path | None,
+    ts: str,
+    device_id: str,
+    sensor: str,
+    value: float | None,
+    unit: str | None,
+    scenario_id: str | None = None,
+) -> None:
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO telemetry (ts, device_id, sensor, value, unit, scenario_id) VALUES (?,?,?,?,?,?)",
+            (ts, device_id, sensor, value, unit, scenario_id),
+        )
+
+
+def purge_telemetry(db_path: str | Path | None, retention_hours: float) -> int:
+    """删除 retention 之前的遥测，返回删除行数。"""
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM telemetry WHERE ts < datetime('now', ?)",
+            (f"-{retention_hours} hours",),
+        )
+        return cur.rowcount
+
+
+def list_telemetry(
+    db_path: str | Path | None,
+    device_id: str | None = None,
+    sensor: str | None = None,
+    minutes: int = 60,
+    limit: int = 2000,
+) -> list[dict[str, Any]]:
+    sql = "SELECT ts, device_id, sensor, value, unit FROM telemetry WHERE ts >= datetime('now', ?)"
+    params: list[Any] = [f"-{int(minutes)} minutes"]
+    if device_id:
+        sql += " AND device_id = ?"
+        params.append(device_id)
+    if sensor:
+        sql += " AND sensor = ?"
+        params.append(sensor)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    with connect(db_path) as conn:
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def count_telemetry(db_path: str | Path | None) -> int:
+    with connect(db_path) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM telemetry").fetchone()[0])
 
 
 def reset_all(db_path: str | Path | None) -> None:

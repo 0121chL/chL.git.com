@@ -23,10 +23,12 @@ export function AnalysisPanel({
   record,
   busy,
   onDecide,
+  onRetry,
 }: {
   record: EventRecord | null;
   busy: boolean;
   onDecide: (decision: "approve" | "reject", approver: string, comment: string) => void;
+  onRetry: () => void;
 }) {
   const [approver, setApprover] = useState("值班调度员");
   const [comment, setComment] = useState("");
@@ -43,6 +45,7 @@ export function AnalysisPanel({
 
   const analysis = record.analysis;
   const pending = record.status === "pending";
+  const retryable = record.status === "analysis_failed" || record.status === "graph_failed";
   const risk = analysis ? RISK[analysis.risk_level] ?? RISK.medium : null;
 
   return (
@@ -131,6 +134,16 @@ export function AnalysisPanel({
         </div>
 
         <div className="mt-2 flex items-center gap-2">
+          {retryable ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onRetry}
+              className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-sm font-medium text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:text-slate-400"
+            >
+              重试分析
+            </button>
+          ) : null}
           <button
             type="button"
             disabled={!pending || busy}

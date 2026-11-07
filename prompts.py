@@ -28,10 +28,18 @@ def build_user_prompt(event: dict[str, Any], clauses: list[dict[str, Any]]) -> s
     clause_block = "\n".join(
         f"[{c['clause_id']}] {c['title']}\n{c['text']}" for c in clauses
     )
-    snapshot = json.dumps(event, ensure_ascii=False, indent=2)
+    context = event.get("_context") or {}
+    snapshot = json.dumps({k: v for k, v in event.items() if k != "_context"}, ensure_ascii=False, indent=2)
+    context_block = ""
+    if context:
+        context_block = (
+            "【工具查询结果（只读，可引用其中的事实，不要臆造）】\n"
+            f"{json.dumps(context, ensure_ascii=False, indent=2)[:1500]}\n\n"
+        )
     return (
         "【事件快照】\n"
         f"{snapshot}\n\n"
+        f"{context_block}"
         "【检索到的规程条款（只能引用这些）】\n"
         f"{clause_block}\n\n"
         "请给出分析 JSON。"

@@ -1,0 +1,51 @@
+{
+  "backend": "http://127.0.0.1:8000",
+  "cooldown_s": 30,
+  "trend_window_s": 60,
+  "merge_window_s": 10,
+  "telemetry": {
+    "persist": true,
+    "retention_hours": 24
+  },
+  "spool": {
+    "dir": "data/spool",
+    "retry_interval_s": 10
+  },
+  "sensors": {
+    "ch4": {
+      "rule_id": "R-CH4-HIGH",
+      "threshold": 1.0,
+      "unit": "%",
+      "severity": "high",
+      "event_type": "threshold_exceeded",
+      "trend": {
+        "enabled": true,
+        "delta": 0.5,
+        "rule_id": "R-CH4-RISE",
+        "severity": "high",
+        "event_type": "gas_surge"
+      }
+    },
+    "temp": {
+      "rule_id": "R-TEMP-HIGH",
+      "threshold": 85.0,
+      "unit": "C",
+      "severity": "high",
+      "event_type": "threshold_exceeded"
+    },
+    "vibration": {
+      "rule_id": "R-VIB-HIGH",
+      "threshold": 4.5,
+      "unit": "mm/s",
+      "severity": "medium",
+      "event_type": "threshold_exceeded"
+    },
+    "co": {
+      "rule_id": "R-CO-HIGH",
+      "threshold": 24.0,
+      "unit": "ppm",
+      "severity": "high",
+      "event_type": "threshold_exceeded"
+    }
+  }
+}

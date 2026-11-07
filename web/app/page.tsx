@@ -6,7 +6,7 @@ import { AnalysisPanel } from "@/components/AnalysisPanel";
 import { EventList } from "@/components/EventList";
 import { StatusBar } from "@/components/StatusBar";
 import { WorkOrderTable } from "@/components/WorkOrderTable";
-import { API_BASE, postApproval } from "@/lib/api";
+import { API_BASE, postApproval, retryAnalysis } from "@/lib/api";
 import type { EventRecord, StatusPayload, StreamMessage, WorkOrder } from "@/lib/types";
 
 export default function DashboardPage() {
@@ -134,6 +134,20 @@ export default function DashboardPage() {
     [events, selectedId],
   );
 
+  const retry = useCallback(async () => {
+    if (!selected) return;
+    setBusyId(selected.event_id);
+    setError(null);
+    try {
+      await retryAnalysis(selected.event_id);
+      patchEvent(selected.event_id, { status: "pending", error: undefined } as Partial<EventRecord>);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  }, [selected, patchEvent]);
+
   const decide = useCallback(
     async (decision: "approve" | "reject", approver: string, comment: string) => {
       if (!selected) return;
@@ -165,6 +179,7 @@ export default function DashboardPage() {
               record={selected}
               busy={busyId === selected?.event_id}
               onDecide={decide}
+              onRetry={retry}
             />
           </div>
         </div>

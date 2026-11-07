@@ -23,14 +23,16 @@ import sqlite3
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from pydantic import BaseModel
@@ -50,12 +52,26 @@ MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_TOPIC = os.environ.get("MQTT_EVENT_TOPIC", "line1/events")
 HEARTBEAT_TOPIC = os.environ.get("MQTT_HEARTBEAT_TOPIC", "line1/heartbeat")
 OFFLINE_TIMEOUT = float(os.environ.get("DEVICE_OFFLINE_TIMEOUT", "15"))
+APPROVAL_TIMEOUT = float(os.environ.get("APPROVAL_TIMEOUT_S", "0"))  # 0=不升级
 HTTP_PORT = int(os.environ.get("BACKEND_PORT", "8000"))
 LOG_DIR = Path(__file__).resolve().parent / "data" / "logs"
 
+# 可选鉴权：设置 API_TOKEN 后，写操作需带 Authorization: Bearer <token>
+API_TOKEN = os.environ.get("API_TOKEN", "")
+# LLM 分析超时（秒），0=不限制；超时自动降级为离线模板
+ANALYSIS_TIMEOUT = float(os.environ.get("ANALYSIS_TIMEOUT_S", "0"))
+ANALYSIS_CONCURRENCY = int(os.environ.get("ANALYSIS_CONCURRENCY", "1"))
+# 可选告警外发
+ALERT_WEBHOOK = os.environ.get("ALERT_WEBHOOK", "")
+ALERTS_FILE = Path(DB_PATH).parent / "alerts.jsonl"
+
 BUS = EventBus()          # SSE 订阅者
 WSBUS = EventBus()        # WebSocket 订阅者（复用同一套线程安全发布逻辑）
-PIPELINE_LOCK = threading.Lock()
+PIPELINE_LOCK = threading.Lock()   # 只保护 LangGraph 的 invoke/get_state
+ANALYSIS_SEM = threading.Semaphore(ANALYSIS_CONCURRENCY)
+
+METRICS: dict[str, float] = {}
+METRICS_LOCK = threading.Lock()
 
 EVENTS: dict[str, dict[str, Any]] = {}          # event_id -> 内存状态
 EVENTS_LOCK = threading.Lock()
@@ -86,6 +102,76 @@ def utcnow() -> str:
 def broadcast(message: dict[str, Any]) -> None:
     BUS.publish(message)
     WSBUS.publish(message)
+
+
+# --------------------------------------------------------------------------- #
+# 指标 / 告警 / 鉴权
+# --------------------------------------------------------------------------- #
+def inc(name: str, value: float = 1.0) -> None:
+    with METRICS_LOCK:
+        METRICS[name] = METRICS.get(name, 0) + value
+
+
+def metrics_text() -> str:
+    with METRICS_LOCK:
+        body = "\n".join(f"{k} {v}" for k, v in sorted(METRICS.items()))
+    extra = [
+        f"queue_depth {max(0, len(EVENTS) - sum(1 for e in EVENTS.values() if e.get('status') in ('approved', 'rejected', 'failed')))}",
+        f"mqtt_connected {1 if STATE.get('mqtt') and STATE['mqtt'].connected else 0}",
+        f"devices_online {sum(1 for d in device_snapshot() if d['online'])}",
+        f"spool_pending {len(list((Path(DB_PATH).parent / 'spool').glob('*.json')))}" if (Path(DB_PATH).parent / 'spool').exists() else "spool_pending 0",
+    ]
+    return "# 安全监测 Agent Demo metrics\n" + body + "\n" + "\n".join(extra) + "\n"
+
+
+def require_auth(authorization: str | None = Header(default=None)) -> None:
+    if not API_TOKEN:
+        return
+    if authorization != f"Bearer {API_TOKEN}":
+        raise HTTPException(status_code=401, detail="缺少或非法 Authorization: Bearer <token>")
+
+
+def emit_alert(event: dict[str, Any], analysis: dict[str, Any]) -> None:
+    """高危/离线事件落 alerts.jsonl；配置了 ALERT_WEBHOOK 时异步转发。"""
+    record = {
+        "ts": utcnow(),
+        "event_id": event.get("event_id"),
+        "device_id": event.get("device_id"),
+        "rule_id": event.get("rule_id"),
+        "event_type": event.get("event_type"),
+        "severity": event.get("severity"),
+        "risk_level": analysis.get("risk_level"),
+        "summary": str(analysis.get("root_cause_hypothesis", ""))[:160],
+        "recommended_action": str(analysis.get("recommended_action", ""))[:160],
+    }
+    try:
+        ALERTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with ALERTS_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        inc("alerts_total")
+    except OSError as exc:
+        print(f"[alert] 写 alerts.jsonl 失败：{exc}", flush=True)
+
+    if not ALERT_WEBHOOK:
+        return
+
+    def post() -> None:
+        import urllib.request
+
+        req = urllib.request.Request(
+            ALERT_WEBHOOK,
+            data=json.dumps(record, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5).close()
+            inc("alerts_webhook_ok")
+        except Exception as exc:  # noqa: BLE001
+            inc("alerts_webhook_failed")
+            print(f"[alert] webhook 失败：{exc}", flush=True)
+
+    threading.Thread(target=post, daemon=True).start()
 
 
 def event_lock(event_id: str) -> threading.Lock:
@@ -157,6 +243,32 @@ def device_watchdog(stop: threading.Event) -> None:
             except Exception as exc:  # noqa: BLE001
                 print(f"[watchdog] 离线事件投递失败: {exc}", flush=True)
 
+        # 审批超时升级：只告警，不自动批准
+        if APPROVAL_TIMEOUT > 0:
+            for event_id, record in list(EVENTS.items()):
+                if record.get("status") != "awaiting_approval" or record.get("escalated"):
+                    continue
+                waited = now - record.get("awaiting_since", now)
+                if waited <= APPROVAL_TIMEOUT:
+                    continue
+                record["escalated"] = True
+                inc("approval_overdue_total")
+                emit_alert(
+                    {
+                        "event_id": event_id,
+                        "device_id": (record.get("event") or {}).get("device_id"),
+                        "rule_id": "R-APPROVAL-OVERDUE",
+                        "event_type": "approval_overdue",
+                        "severity": "high",
+                    },
+                    {
+                        "risk_level": "high",
+                        "root_cause_hypothesis": f"事件 {event_id} 待审批已 {waited:.0f}s，超过 {APPROVAL_TIMEOUT}s",
+                        "recommended_action": "值班负责人尽快审批或转交",
+                    },
+                )
+                print(f"[watchdog] {event_id} 审批超时 {waited:.0f}s，已告警", flush=True)
+
 
 def counts() -> dict[str, int]:
     return {
@@ -209,6 +321,40 @@ def resolve_citations(analysis: dict[str, Any]) -> list[dict[str, Any]]:
     return citations
 
 
+def collect_tools(event: dict[str, Any], calls: list[str]) -> dict[str, Any]:
+    """Agent 的只读工具：设备在线状态、同设备近期事件。写操作仍走 interrupt。"""
+    out: dict[str, Any] = {}
+    device = event.get("device_id")
+
+    if "get_device_status" in calls:
+        snapshot = device_snapshot()
+        out["device"] = next(
+            (d for d in snapshot if d["device_id"] == device),
+            {"device_id": device, "online": None, "note": "无该设备心跳记录"},
+        )
+
+    if "get_recent_events" in calls:
+        recent = []
+        for row in db.list_events(DB_PATH, limit=30):
+            ev = row.get("event") or {}
+            if device and ev.get("device_id") != device:
+                continue
+            recent.append(
+                {
+                    "event_id": row["event_id"],
+                    "rule_id": ev.get("rule_id"),
+                    "status": row["status"],
+                    "received_at": row.get("received_at"),
+                }
+            )
+            if len(recent) >= 5:
+                break
+        out["recent_events"] = recent
+
+    inc("tool_calls_total")
+    return out
+
+
 def pick_analyzer() -> tuple[str, str, Callable[[dict[str, Any]], dict[str, Any]]]:
     """选择分析后端：Ollama → 本地 transformers → 离线模板。"""
     mode = os.environ.get("LLM_BACKEND", "auto")
@@ -240,56 +386,102 @@ def process_event(event: dict[str, Any]) -> None:
     event_id = event["event_id"]
     graph = STATE["app"]
 
-    with PIPELINE_LOCK:
-        _mark(event_id, status="analyzing")
-        db.upsert_event(DB_PATH, event_id, event)
-        broadcast({"type": "event", "event": event, "event_id": event_id, "counts": counts()})
+    _mark(event_id, status="queued")
+    db.upsert_event(DB_PATH, event_id, event)
+    inc("events_ingested_total")
+    broadcast({"type": "event", "event": event, "event_id": event_id, "counts": counts()})
 
-        try:
-            analysis = STATE["analyze"](event)
-        except Exception as exc:  # noqa: BLE001
-            _mark(event_id, status="analysis_failed", error=str(exc))
-            db.set_event_status(DB_PATH, event_id, "analysis_failed")
-            broadcast(
-                {
-                    "type": "analysis_error",
-                    "event_id": event_id,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "counts": counts(),
-                }
-            )
-            return
-
-        citations = resolve_citations(analysis)
-
-        try:
-            graph.invoke({"event": event}, ag.thread_config(event_id))
-        except Exception as exc:  # noqa: BLE001
-            _mark(event_id, status="graph_failed", error=str(exc))
-            db.set_event_status(DB_PATH, event_id, "graph_failed")
-            broadcast(
-                {
-                    "type": "analysis_error",
-                    "event_id": event_id,
-                    "error": f"图执行失败: {exc}",
-                    "counts": counts(),
-                }
-            )
-            return
-
-        db.save_event_analysis(DB_PATH, event_id, analysis, citations)
-        _mark(event_id, status="awaiting_approval", analysis=analysis, citations=citations)
+    started = time.perf_counter()
+    source = STATE["analyzer_source"]
+    try:
+        analysis, source = _analyze_with_timeout(event)
+    except Exception as exc:  # noqa: BLE001
+        inc("analysis_failed_total")
+        _mark(event_id, status="analysis_failed", error=str(exc))
+        db.set_event_status(DB_PATH, event_id, "analysis_failed")
         broadcast(
             {
-                "type": "analysis",
+                "type": "analysis_error",
                 "event_id": event_id,
-                "event": event,
-                "analysis": analysis,
-                "citations": citations,
-                "status": "pending",
+                "error": f"{type(exc).__name__}: {exc}",
+                "retryable": True,
                 "counts": counts(),
             }
         )
+        return
+
+    elapsed = round(time.perf_counter() - started, 1)
+    inc("analysis_total")
+    inc("analysis_seconds", elapsed)
+    citations = resolve_citations(analysis)
+
+    try:
+        with PIPELINE_LOCK:  # 只锁图操作，LLM 推理在此期间不再占锁
+            graph.invoke({"event": event}, ag.thread_config(event_id))
+    except Exception as exc:  # noqa: BLE001
+        inc("graph_failed_total")
+        _mark(event_id, status="graph_failed", error=str(exc))
+        db.set_event_status(DB_PATH, event_id, "graph_failed")
+        broadcast(
+            {
+                "type": "analysis_error",
+                "event_id": event_id,
+                "error": f"图执行失败: {exc}",
+                "retryable": True,
+                "counts": counts(),
+            }
+        )
+        return
+
+    db.save_event_analysis(DB_PATH, event_id, analysis, citations)
+    _mark(
+        event_id,
+        status="awaiting_approval",
+        analysis=analysis,
+        citations=citations,
+        analysis_source=source,
+        analysis_seconds=elapsed,
+        awaiting_since=time.time(),
+    )
+    broadcast(
+        {
+            "type": "analysis",
+            "event_id": event_id,
+            "event": event,
+            "analysis": analysis,
+            "citations": citations,
+            "analysis_source": source,
+            "analysis_seconds": elapsed,
+            "status": "pending",
+            "counts": counts(),
+        }
+    )
+
+    if event.get("severity") == "high" or event.get("event_type") == "device_offline":
+        emit_alert(event, analysis)
+
+
+def _analyze_with_timeout(event: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """并发上限 + 可选超时降级：LLM 太慢时退回离线模板，不把演示卡死。"""
+    _mark(event["event_id"], status="analyzing")
+    with ANALYSIS_SEM:
+        if ANALYSIS_TIMEOUT <= 0:
+            return STATE["analyze"](event), STATE["analyzer_source"]
+
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(STATE["analyze"], event)
+        try:
+            result = future.result(timeout=ANALYSIS_TIMEOUT)
+            pool.shutdown(wait=False)
+            return result, STATE["analyzer_source"]
+        except FuturesTimeout:
+            inc("analysis_timeout_total")
+            print(
+                f"[analyze] 超过 {ANALYSIS_TIMEOUT}s 未完成，降级为离线模板：{event['event_id']}",
+                flush=True,
+            )
+            pool.shutdown(wait=False, cancel_futures=True)
+            return offline_analyzer.analyze(event), "offline-fallback"
 
 
 def _mark(event_id: str, **fields: Any) -> None:
@@ -308,7 +500,9 @@ class DecisionBody(BaseModel):
 
 def _normalize_approver(value: str | None) -> str:
     name = (value or "").strip()
-    return name[:60] if name else "未署名"
+    if len(name) < 2:
+        raise HTTPException(status_code=422, detail="必须填写审批人（至少 2 个字符），审批不可匿名")
+    return name[:60]
 
 
 def _decide(
@@ -320,7 +514,6 @@ def _decide(
     """approve/reject 的公共实现；同一 event_id 重复调用不会产生第二张工单。"""
     graph = STATE["app"]
     config = ag.thread_config(event_id)
-    who = _normalize_approver(approver)
     note = (comment or "").strip()[:500] or None
 
     with event_lock(event_id), PIPELINE_LOCK:
@@ -349,6 +542,9 @@ def _decide(
                     "has_work_order": bool(existing),
                 },
             )
+
+        # 真正要落审批记录时才要求审批人：重复调用/状态冲突优先返回 409
+        who = _normalize_approver(approver)
 
         result = graph.invoke(Command(resume=decision), config)
         status = "approved" if decision == "approve" else "rejected"
@@ -437,7 +633,9 @@ async def lifespan(_: FastAPI):
 
     STATE.update(
         {
-            "app": ag.build_app(DB_PATH, checkpointer=checkpointer, analyze_fn=analyze_fn),
+            "app": ag.build_app(
+                DB_PATH, checkpointer=checkpointer, analyze_fn=analyze_fn, tools_fn=collect_tools
+            ),
             "analyzer_source": source,
             "analyzer_model": model,
             "analyze": analyze_fn,
@@ -504,18 +702,33 @@ app.add_middleware(
 # --------------------------------------------------------------------------- #
 # P5 契约
 # --------------------------------------------------------------------------- #
-@app.post("/events", status_code=202)
+@app.post("/events", status_code=202, dependencies=[Depends(require_auth)])
 def post_event(event: dict[str, Any]) -> dict[str, Any]:
     return _ingest(event, source="rule_engine")
 
 
-@app.post("/approve/{event_id}")
+@app.post("/events/{event_id}/reanalyze", dependencies=[Depends(require_auth)])
+def reanalyze_event(event_id: str) -> dict[str, Any]:
+    """失败事件重跑：仅允许 analysis_failed / graph_failed，重跑前清掉旧状态。"""
+    record = EVENTS.get(event_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="未知 event_id（后端重启后内存已清空，请重新投递）")
+    if record.get("status") not in ("analysis_failed", "graph_failed"):
+        raise HTTPException(status_code=409, detail=f"当前状态 {record.get('status')} 不需要重试")
+
+    _mark(event_id, status="queued", error=None)
+    inc("analysis_retry_total")
+    threading.Thread(target=process_event, args=(record["event"],), daemon=True).start()
+    return {"ok": True, "event_id": event_id, "status": "queued"}
+
+
+@app.post("/approve/{event_id}", dependencies=[Depends(require_auth)])
 def approve(event_id: str, body: DecisionBody | None = None) -> dict[str, Any]:
     body = body or DecisionBody()
     return _decide(event_id, "approve", body.approver, body.comment)
 
 
-@app.post("/reject/{event_id}")
+@app.post("/reject/{event_id}", dependencies=[Depends(require_auth)])
 def reject(event_id: str, body: DecisionBody | None = None) -> dict[str, Any]:
     body = body or DecisionBody()
     return _decide(event_id, "reject", body.approver, body.comment)
@@ -538,6 +751,37 @@ def get_memory_event(event_id: str) -> dict[str, Any]:
     if not record:
         raise HTTPException(status_code=404, detail="未知 event_id")
     return record
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics() -> str:
+    return metrics_text()
+
+
+@app.get("/api/telemetry")
+def api_telemetry(
+    device_id: str | None = None,
+    sensor: str | None = None,
+    minutes: int = 60,
+    limit: int = 2000,
+) -> dict[str, Any]:
+    points = db.list_telemetry(DB_PATH, device_id=device_id, sensor=sensor, minutes=minutes, limit=limit)
+    return {"count": len(points), "points": points}
+
+
+@app.get("/api/alerts")
+def api_alerts(limit: int = 50) -> dict[str, Any]:
+    if not ALERTS_FILE.exists():
+        return {"alerts": []}
+    lines = ALERTS_FILE.read_text(encoding="utf-8").splitlines()[-limit:]
+    alerts: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            alerts.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    alerts.reverse()
+    return {"alerts": alerts}
 
 
 @app.websocket("/ws")
@@ -613,7 +857,7 @@ async def api_stream() -> StreamingResponse:
     )
 
 
-@app.post("/api/approvals/{event_id}")
+@app.post("/api/approvals/{event_id}", dependencies=[Depends(require_auth)])
 def api_approval(event_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = body or {}
     decision = str(payload.get("decision", "approve")).strip().lower()
@@ -626,7 +870,7 @@ def api_approval(event_id: str, body: dict[str, Any] | None = None) -> dict[str,
     raise HTTPException(status_code=422, detail=f"非法 decision: {decision!r}")
 
 
-@app.post("/api/dev/inject")
+@app.post("/api/dev/inject", dependencies=[Depends(require_auth)])
 def api_inject(event: dict[str, Any]) -> dict[str, Any]:
     return _ingest(event, source="dev")
 

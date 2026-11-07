@@ -101,6 +101,17 @@ npm run dev
 
 ```powershell
 curl.exe -s http://127.0.0.1:8000/api/status
+curl.exe -s http://127.0.0.1:8000/metrics
+```
+
+可选环境变量（启动 backend 前设置）：
+
+```powershell
+$env:LLM_BACKEND="offline"        # offline / local / ollama / auto
+$env:API_TOKEN="your-token"       # 非空则写接口需要 Bearer token
+$env:ANALYSIS_TIMEOUT_S="90"      # 超时降级为离线模板
+$env:APPROVAL_TIMEOUT_S="600"     # 待审批超时写告警
+$env:ALERT_WEBHOOK="http://..."   # 告警外发地址（可选）
 ```
 
 关键字段：

@@ -118,7 +118,9 @@ def main() -> int:
     print("  ✓ 0 张")
 
     print("[5/6] POST 批准")
-    status, body = post(f"/api/approvals/{event_id}", {"decision": "approve"})
+    status, body = post(
+        f"/api/approvals/{event_id}", {"decision": "approve", "approver": "验收脚本"}
+    )
     if status != 200:
         print(f"  ✗ 批准失败 {status} {body}")
         return 1
