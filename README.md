@@ -51,14 +51,26 @@ safe-monitor-agent
    （自动生成 `R-DEV-OFFLINE` 事件）；`modbus_bridge.py` 把 Modbus 仪表读成 MQTT
    （`--fake` 可在无硬件时跑通同一条链路）。
 
-## 一键演示（可选）
+## 一键启动（推荐）
+
+双击或命令行运行：
+
+| 文件 | 作用 |
+|---|---|
+| **`START.cmd`** | 体检 → 起 broker/后端/规则引擎/模拟器/前端 → 自动打开浏览器 |
+| **`DEMO.cmd`** | 注入一次 `ch4_rise` 异常（看板出现事件卡片） |
+| **`STOP.cmd`** | 停止全部应用进程（broker 服务需管理员停） |
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\start_demo.ps1   # 体检 + 起 5 个服务
-.\demo_trigger.ps1                                          # 注入 ch4_rise
-# 浏览器 http://localhost:3000 → 填审批人/意见 → 点批准 → 工单入表
-.\stop_demo.ps1                                             # 停止
+.\START.cmd                 # 默认离线模板，秒出分析
+.\START.cmd -Backend local  # 用本地 Qwen2.5-3B（CPU，约 1 分钟/次）
+.\START.cmd -Check          # 只体检
+.\START.cmd -NoSimulator    # 不起传感器，只用注入
+.\DEMO.cmd                  # 触发一次异常
+.\STOP.cmd                  # 停止
 ```
+
+窗口里会打印每个服务的地址与日志位置；失败时停在窗口里显示原因（`data\logs\*.err`）。
 
 ## 手动启动（默认方式，详见 `START-MANUAL.md`）
 
