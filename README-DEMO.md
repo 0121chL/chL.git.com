@@ -90,20 +90,25 @@ powershell -ExecutionPolicy Bypass -File .\start_demo.ps1
 
 ```
 [rule] 订阅 line1/telemetry @ 127.0.0.1:1883；事件写入 ...\events.jsonl；后端 http://127.0.0.1:8000
-[rule] 触发 R-CH4-RISE ch4=0.89% -> evt-r-ch4-rise-...
+[rule] 触发 R-CH4-HIGH ch4=1.05% -> evt-r-ch4-high-...
 [rule] POST /events -> 202 {"accepted":true,"duplicate":false,...}
-[rule] 触发 R-CH4-HIGH ch4=1.18% -> evt-r-ch4-high-...
-[rule] POST /events -> 202 {...}
 ```
 
-浏览器 <http://localhost:3000> 依次出现：左侧 `R-CH4-RISE / 高危` 卡片 → 右侧分析卡（根因 / 规程依据 / 建议动作 / 风险等级）→ 点「批准」→ 底部工单表新增 `WO-xxxx`。
+一次异常只产出一条事件。趋势规则只在累计观察满 `--trend-window`（默认 60s）后才评估，
+且同传感器 10s 内（`--merge-window`）的后续事件会被合并抑制，日志会打印：
+
+```
+[rule] 合并：R-CH4-HIGH 与 1.0s 前的同传感器事件同源，抑制重复事件
+```
+
+浏览器 <http://localhost:3000> 依次出现：左侧 `R-CH4-HIGH / 高危` 卡片 → 右侧分析卡（根因 / 规程依据 / 建议动作 / 风险等级）→ 点「批准」→ 底部工单表新增 `WO-xxxx`。
 
 ---
 
 ## 3. 验收命令（可直接粘贴）
 
 ```powershell
-# 3.1 后端契约 + 重复批准幂等 + WS 三类推送（19 条断言）
+# 3.1 后端契约 + 重复批准幂等 + 审批留痕 + WS 三类推送（25 条断言）
 python scripts\p5_acceptance.py
 
 # 3.2 接口级全链路（不经浏览器）

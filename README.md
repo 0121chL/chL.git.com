@@ -9,7 +9,7 @@ safe-monitor-agent
 ├─ server.py               等价入口（兼容旧命令）
 ├─ agent_graph.py          LangGraph：analyze → interrupt → 批准/驳回
 ├─ analyzer.py             检索 + Ollama + 接地校验
-├─ regulation_store.py     16 条模拟规程 + FAISS + BM25
+├─ regulation_store.py     17 条模拟规程 + FAISS + BM25
 ├─ offline_analyzer.py     无 Ollama 时的模板兜底
 ├─ db.py                   SQLite：events / work_orders / approvals / audit_log
 ├─ rule_engine.py          阈值/趋势规则 → events.jsonl + POST /events

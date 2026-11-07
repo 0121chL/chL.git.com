@@ -117,10 +117,13 @@ def main() -> int:
     ap.add_argument("--mqtt", default="127.0.0.1:1883")
     ap.add_argument("--backend", default="http://127.0.0.1:8000")
     ap.add_argument("--cooldown", type=float, default=30.0)
+    ap.add_argument("--trend-window", type=float, default=60.0, help="趋势规则的观察窗口（秒）")
+    ap.add_argument("--merge-window", type=float, default=10.0, help="同传感器事件合并窗口（秒）")
     args = ap.parse_args()
 
     host, _, port = args.mqtt.partition(":")
     history: dict[str, deque] = defaultdict(lambda: deque(maxlen=HISTORY))
+    last_emitted: dict[str, float] = defaultdict(float)  # 合并窗用：每传感器上次生效事件
 
     def on_message(client, userdata, msg):  # noqa: ANN001
         try:
@@ -136,36 +139,46 @@ def main() -> int:
         except (TypeError, ValueError):
             return
 
-        history[sensor].append((time.time(), value))
+        now = time.time()
+        history[sensor].append((now, value))
         spec = THRESHOLDS.get(sensor)
         if not spec:
             return
 
-        # 1) 阈值规则
-        if value > spec["value"] and time.time() - last_fired[spec["rule_id"]] > args.cooldown:
-            last_fired[spec["rule_id"]] = time.time()
-            event = make_event(sensor, value, spec, history, "threshold_exceeded")
-            fire(event, args.backend)
+        # 1) 阈值规则优先（同一读数只产出一条事件）
+        if value > spec["value"] and now - last_fired[spec["rule_id"]] > args.cooldown:
+            last_fired[spec["rule_id"]] = now
+            fire(make_event(sensor, value, spec, history, "threshold_exceeded"), sensor)
             return
 
-        # 2) 趋势规则：ch4 60 秒内上升 >= 0.5 个百分点
-        if sensor == "ch4" and len(history["ch4"]) > 5:
-            cutoff = time.time() - 60
-            older = [(t, v) for t, v in history["ch4"] if t <= cutoff] or [list(history["ch4"])[0]]
-            delta = value - older[-1][1]
-            if delta >= 0.5 and time.time() - last_fired["R-CH4-RISE"] > args.cooldown:
-                last_fired["R-CH4-RISE"] = time.time()
-                spec_rise = dict(spec, rule_id="R-CH4-RISE", severity="high")
-                event = make_event(sensor, value, spec_rise, history, "gas_surge")
-                fire(event, args.backend)
+        # 2) 趋势规则：必须真的有窗口长度的历史，避免用首样本当基线造成早报
+        if sensor == "ch4":
+            points = list(history["ch4"])
+            span = points[-1][0] - points[0][0] if points else 0.0
+            if span >= args.trend_window:
+                older = [p for p in points if p[0] <= now - args.trend_window]
+                if older:
+                    delta = value - older[-1][1]
+                    if delta >= 0.5 and now - last_fired["R-CH4-RISE"] > args.cooldown:
+                        last_fired["R-CH4-RISE"] = now
+                        spec_rise = dict(spec, rule_id="R-CH4-RISE", severity="high")
+                        fire(make_event(sensor, value, spec_rise, history, "gas_surge"), sensor)
 
-    def fire(event: dict[str, Any], backend: str) -> None:
+    def fire(event: dict[str, Any], sensor: str) -> None:
+        now = time.time()
+        gap = now - last_emitted[sensor]
+        if gap < args.merge_window:
+            print(
+                f"[rule] 合并：{event['rule_id']} 与 {gap:.1f}s 前的同传感器事件同源，抑制重复事件"
+            )
+            return
+        last_emitted[sensor] = now
         print(
             f"[rule] 触发 {event['rule_id']} {event['sensor']}={event['observed']['value']}"
             f"{event['observed']['unit']} -> {event['event_id']}"
         )
         append_event(event)
-        post_event(event, backend)
+        post_event(event, args.backend)
 
     client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id="rule-engine")
     client.on_message = on_message
