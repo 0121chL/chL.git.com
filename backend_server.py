@@ -52,7 +52,7 @@ MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_TOPIC = os.environ.get("MQTT_EVENT_TOPIC", "line1/events")
 HEARTBEAT_TOPIC = os.environ.get("MQTT_HEARTBEAT_TOPIC", "line1/heartbeat")
 OFFLINE_TIMEOUT = float(os.environ.get("DEVICE_OFFLINE_TIMEOUT", "15"))
-APPROVAL_TIMEOUT = float(os.environ.get("APPROVAL_TIMEOUT_S", "0"))  # 0=不升级
+APPROVAL_TIMEOUT = float(os.environ.get("APPROVAL_TIMEOUT_S", "600"))  # 默认 10 分钟未审批升级告警
 HTTP_PORT = int(os.environ.get("BACKEND_PORT", "8000"))
 LOG_DIR = Path(__file__).resolve().parent / "data" / "logs"
 
@@ -290,6 +290,7 @@ def status_payload() -> dict[str, Any]:
         "checkpointer": STATE.get("checkpointer", "memory"),
         "devices": device_snapshot(),
         "offline_timeout_s": OFFLINE_TIMEOUT,
+        "approval_timeout_s": APPROVAL_TIMEOUT,
     }
 
 

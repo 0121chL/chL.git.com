@@ -1,6 +1,8 @@
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
 
+import type { TelemetryPoint } from "./types";
+
 /** 设置 API_TOKEN 时，前端用这个头访问写接口 */
 const TOKEN = process.env.NEXT_PUBLIC_API_TOKEN ?? "";
 
@@ -53,4 +55,22 @@ export async function retryAnalysis(eventId: string): Promise<{ ok: boolean; sta
   });
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()) as { ok: boolean; status: string };
+}
+
+/** 最近 N 分钟的原始遥测（升序返回，便于直接画折线） */
+export async function fetchTelemetry(
+  deviceId: string,
+  sensor: string,
+  minutes = 30,
+): Promise<TelemetryPoint[]> {
+  const params = new URLSearchParams({
+    device_id: deviceId,
+    sensor,
+    minutes: String(minutes),
+    limit: "600",
+  });
+  const res = await fetch(`${API_BASE}/api/telemetry?${params.toString()}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(await readError(res));
+  const body = (await res.json()) as { points: TelemetryPoint[] };
+  return [...body.points].reverse();
 }

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { TelemetryChart } from "@/components/TelemetryChart";
 import type { EventRecord, RiskLevel } from "@/lib/types";
 
 const RISK: Record<RiskLevel, { label: string; cls: string }> = {
@@ -101,6 +102,14 @@ export function AnalysisPanel({
 
             <Section title="建议动作">
               <p className="text-sm leading-relaxed text-slate-800">{analysis.recommended_action}</p>
+            </Section>
+
+            <Section title="遥测趋势">
+              <TelemetryChart
+                deviceId={record.event.device_id}
+                sensor={record.event.sensor}
+                unit={record.event.observed?.unit}
+              />
             </Section>
           </>
         )}

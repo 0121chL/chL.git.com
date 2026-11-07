@@ -77,10 +77,10 @@ Set-Service -Name mosquitto -StartupType Manual
 | # | 硬伤 | 现在的实现 | 验证 |
 |---|---|---|---|
 | 1 | 事件会丢 | `rule_engine` POST 失败写 `data/spool/*.json`，后台每 10s 重投，成功即删 | `_spool_test` 实测：暂存→重投→后端 202→文件消失 |
-| 2 | 无原始时序 | 遥测落 SQLite `telemetry` 表（默认保留 24h，每小时清理）；`GET /api/telemetry` 查询 | 注入后 `points=40` |
+| 2 | 无原始时序 | 遥测落 SQLite `telemetry` 表（默认保留 24h，每小时清理）；`GET /api/telemetry` 查询；分析卡新增「遥测趋势」折线（最近 30 分钟，15s 刷新） | 注入后 `points=40`，图表 30 点 |
 | 3 | 分析串行、慢 | 分析并发信号量 + `ANALYSIS_TIMEOUT_S` 超时降级（超时自动改离线模板）；图操作单独加锁，审批不再被分析阻塞 | `/metrics` 的 `analysis_timeout_total` |
 | 4 | 不是真 Agent | 图加 `plan → tools → analyze`：按策略调用 `get_device_status` / `get_recent_events`，工具结果进提示词 | `/metrics` 的 `tool_calls_total` |
-| 5 | 审批语义弱 | 审批人必填（≥2 字，否则 422）；`APPROVAL_TIMEOUT_S` 超时升级告警；重复调用幂等/409 优先于 422 | `p5_acceptance` 25/25 |
+| 5 | 审批语义弱 | 审批人必填（≥2 字，否则 422）；`APPROVAL_TIMEOUT_S` 默认 600s，超时升级告警（不自动批）；重复调用 409 优先于 422 | `p5_acceptance` 25/25 |
 | 6 | 规则硬编码 | 阈值/单位/趋势全部移到 `config/rules.json`，新增 co 规则；`--rules` 可换配置 | `tests/test_rules.py` |
 | 7 | 失败不闭环 | `POST /events/{id}/reanalyze` 重试；前端「重试分析」按钮；高危/离线事件写 `data/alerts.jsonl`，可配 `ALERT_WEBHOOK` | `GET /api/alerts` |
 | 8 | 可观测性弱 | `GET /metrics`（Prometheus 文本）：事件/分析/超时/工具/告警/队列/在线设备/spool | 实测见下表 |
@@ -93,7 +93,7 @@ Set-Service -Name mosquitto -StartupType Manual
 API_TOKEN=             # 非空则写接口需要 Bearer token
 ANALYSIS_TIMEOUT_S=0   # >0 时分析超时降级为离线模板
 ANALYSIS_CONCURRENCY=1 # 允许并发的分析数（CPU 3B 建议保持 1）
-APPROVAL_TIMEOUT_S=0   # >0 时待审批超时写告警（不自动批准）
+APPROVAL_TIMEOUT_S=600 # 待审批超时写告警（默认 10 分钟，不自动批准）
 ALERT_WEBHOOK=         # 可选：告警 POST 到该地址
 DEVICE_OFFLINE_TIMEOUT=15
 ```

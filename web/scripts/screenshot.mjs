@@ -33,7 +33,17 @@ if (eventId) {
     card?.click();
   }, eventId);
 }
-await new Promise((r) => setTimeout(r, 3000));
+await new Promise((r) => setTimeout(r, 6000));
+// 分析卡内部滚动到底部，确保「遥测趋势」在截图里可见
+await page.evaluate(() => {
+  const panes = Array.from(document.querySelectorAll("div")).filter(
+    (d) => d.scrollHeight > d.clientHeight + 20 && d.innerText.includes("遥测趋势"),
+  );
+  panes.forEach((p) => {
+    p.scrollTop = p.scrollHeight;
+  });
+});
+await new Promise((r) => setTimeout(r, 800));
 await page.screenshot({ path: out });
 const text = await page.evaluate(() => document.body.innerText.slice(0, 400));
 console.log(text.replace(/\n+/g, " | "));

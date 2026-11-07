@@ -55,6 +55,14 @@ export interface WorkOrder {
   decided_at?: string | null;
 }
 
+export interface TelemetryPoint {
+  ts: string;
+  device_id: string;
+  sensor: string;
+  value: number | null;
+  unit?: string | null;
+}
+
 export interface StatusPayload {
   mqtt: {
     connected: boolean;
