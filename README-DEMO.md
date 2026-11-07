@@ -16,10 +16,16 @@
 | Python 3.11+ 及依赖 | `python -c "import fastapi, uvicorn, paho.mqtt.client, langgraph"` | ✅ 3.13.14 |
 | Mosquitto | `Get-NetTCPConnection -LocalPort 1883` | ✅ 已装为 Windows 服务 |
 | Node 22 + 前端依赖 | `cd web; npm run dev` 能起 | ✅ `.tools/node-*`（便携版） |
-| Ollama + qwen2.5:7b | `ollama list` | ❌ 未安装 → 自动回退离线模板 |
+| 分析后端（三选一） | `curl http://127.0.0.1:8000/api/status` 看 `analyzer` | ✅ 本地 Qwen2.5-3B（CPU） |
 
-> Ollama 缺失不阻断演示：后端启动时探测失败会使用 `offline_analyzer`，界面徽章显示
-> 「分析引擎：离线模板（非模型）」，分析文本带 `[离线模板]` 前缀。装上后重启后端即可切换。
+> 后端启动时按 **Ollama → 本地模型 → 离线模板** 顺序探测：
+> - `analyzer=ollama`：Ollama + qwen2.5:7b；
+> - `analyzer=local-qwen`：`local_llm.py` + Qwen2.5-3B-Instruct（bf16/CPU，单次分析约 55–100 秒）；
+> - `analyzer=offline-template`：模板兜底，文本带 `[离线模板]` 前缀。
+>
+> 强制指定：`$env:LLM_BACKEND="local"` / `"ollama"` / `"offline"` 再启动 `backend_server.py`。
+> 本地模型目录：`.models/Qwen2.5-3B-Instruct`（约 6.2 GB，已 gitignore，可用
+> `python scripts\_download_model.py` 或 huggingface-cli 重新拉取）。
 
 ---
 
@@ -195,6 +201,54 @@ approve after restart -> ok=True duplicate=False work_order=10 approver=李工
 ```
 
 若这里返回 409，说明 `data/checkpoints.db` 被删了或用了 `InMemorySaver`（检查 `/api/status` 的 `checkpointer`）。
+
+---
+
+## 3.7 设备接入：device_id / 心跳 / 离线事件 / Modbus 桥
+
+**遥测与事件都带 `device_id`**：`sensor_simulator.py --device line1-dev-02`、`modbus_bridge.py`
+按 `config/devices.json` 里的设备编号发布。规则引擎按 `(device_id, sensor)` 分别维护历史与冷却，
+多台设备的同名传感器不会互相污染。
+
+**心跳与离线**：设备每 2s 发 `line1/heartbeat`；后端超过 `DEVICE_OFFLINE_TIMEOUT`（默认 15s）
+收不到就自动生成一条 `R-DEV-OFFLINE` 事件（severity=medium，引用第四百三十二条「安全监控设备
+维护与故障处置」），心跳恢复后自动解除离线标记。
+
+```powershell
+# 起模拟器（会同时发遥测与心跳）
+python sensor_simulator.py
+# 另开终端看设备状态
+(Invoke-RestMethod "http://127.0.0.1:8000/api/status").devices
+
+# 停掉模拟器，等 20 秒再看
+(Invoke-RestMethod "http://127.0.0.1:8000/api/status").devices
+```
+
+预期：
+
+```
+device_id      : line1-dev-01
+online         : True        # 有心跳时
+...
+device_id      : line1-dev-01
+online         : False       # 停 20s 后
+silent_seconds : 21.9
+offline_events : 3
+```
+
+事件表里会多出 `R-DEV-OFFLINE`，分析卡引用「第四百三十二条 安全监控设备维护与故障处置」。
+
+**Modbus 桥（接真实仪表）**：
+
+```powershell
+python modbus_bridge.py --fake      # 无硬件：模拟读数，链路与真实一致
+python modbus_bridge.py             # 真实：按 config/devices.json 读 Modbus-TCP/RTU
+```
+
+`config/devices.json` 里每个点位 `value = raw * scale + offset`，改寄存器地址/量程即可，
+规则引擎与后端都不用改。
+
+> 实测：`--fake` 跑 8s，`/api/status` 的 `heartbeats` 从 0 涨到 18，`devices[0].online=true`。
 
 ---
 

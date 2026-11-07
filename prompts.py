@@ -17,7 +17,10 @@ SYSTEM_PROMPT = """你是安全工程决策辅助 Agent。你的输出必须严�
 4. regulation_basis 必须逐条写出条款编号与要点，例如「第一百三十八条：瓦斯涌出异常判定与撤人」；
    只能引用我提供的条款，不得编造条款编号或原文。
 5. recommended_action 中每个动作后面用括号标注依据的条款编号，例如「停止作业并撤出人员（第一百三十八条）」。
-6. 不得虚构事件快照中不存在的传感器或读数。"""
+6. 不得虚构事件快照中不存在的传感器或读数。
+7. risk_level 不得低于事件快照中的 severity：severity=high 时 risk_level 必须是 high。
+8. root_cause_hypothesis 必须引用本事件的具体数值（实测值、上升幅度、风量变化等），
+   并用一句话说明推理；禁止照抄本提示中的规则原句。"""
 
 
 def build_user_prompt(event: dict[str, Any], clauses: list[dict[str, Any]]) -> str:

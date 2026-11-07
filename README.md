@@ -8,16 +8,19 @@ safe-monitor-agent
 ├─ backend_server.py       FastAPI：REST + WS + SSE，审批恢复与幂等
 ├─ server.py               等价入口（兼容旧命令）
 ├─ agent_graph.py          LangGraph：analyze → interrupt → 批准/驳回
-├─ analyzer.py             检索 + Ollama + 接地校验
+├─ analyzer.py              检索 + 接地校验（Ollama / 本地模型共用）
+├─ local_llm.py            transformers 本地推理（Qwen2.5-3B-Instruct）
 ├─ regulation_store.py     17 条模拟规程 + FAISS + BM25
-├─ offline_analyzer.py     无 Ollama 时的模板兜底
+├─ offline_analyzer.py     无模型时的模板兜底
 ├─ db.py                   SQLite：events / work_orders / approvals / audit_log
-├─ rule_engine.py          阈值/趋势规则 → events.jsonl + POST /events
-├─ sensor_simulator.py     正常模式 / --inject ch4_rise|temp_spike
-├─ mqtt_bridge.py          line1/events 订阅
+├─ rule_engine.py          阈值/趋势规则 → events.jsonl + POST /events（带 device_id）
+├─ sensor_simulator.py     正常模式 / --inject / 心跳
+├─ modbus_bridge.py        Modbus → MQTT（--fake 无硬件演示）
+├─ mqtt_bridge.py          line1/events + line1/heartbeat 订阅
 ├─ web/                    Next.js 15 App Router + Tailwind
-├─ scripts/                p5_acceptance / e2e_check / inject_event / reset_demo
-└─ config/mosquitto.conf
+├─ scripts/                p5_acceptance / e2e_check / local_llm_check / reset_demo
+├─ config/                 mosquitto.conf / devices.json（Modbus 点位）
+└─ .models/                Qwen2.5-3B-Instruct（约 6.2 GB，已 gitignore）
 ```
 
 ## 阶段与文档
@@ -29,6 +32,7 @@ safe-monitor-agent
 | P4 | SSE + Next.js 双卡片看板 | `README-P4.md` | `python scripts/e2e_check.py` / `web/scripts/browser_check.mjs` |
 | P5 | 集成联调 + 一键演示 | `README-DEMO.md` | `python scripts/p5_acceptance.py`（25 项） |
 | P6 | 审批留痕 + 断点持久化 | `README-DEMO.md` §3.5/§3.6 | 同上 + 重启恢复手工验收 |
+| P7 | 本地 3B 模型 + 设备接入 | 本文 §P7 / `README-DEMO.md` §3.7 | `python scripts/local_llm_check.py` |
 
 ### P6 两个改动
 
@@ -36,6 +40,16 @@ safe-monitor-agent
    （`event_id` 唯一），工单列表 join 出「审批人 / 审批时间」；重复批准不会覆盖第一审批人。
 2. **断点持久化**：`SqliteSaver` 存 `data/checkpoints.db`，后端重启后仍可批准原待审批事件
    （`/api/status` 的 `checkpointer` 字段可查）。
+
+### P7 两个改动
+
+1. **真模型（本地）**：`local_llm.py` 用 transformers 跑 `Qwen2.5-3B-Instruct`（bf16 / CPU），
+   与 Ollama 共用同一套提示词与接地校验。启动时按 `Ollama → 本地模型 → 离线模板` 顺序探测，
+   界面徽章显示 `Qwen2.5-3B（本地 CPU）`。单次分析约 **55–100 秒**（CPU），可用
+   `LLM_BACKEND=offline` 切回模板，或 `LLM_BACKEND=ollama` 指定 Ollama。
+2. **设备接入**：遥测/事件带 `device_id`；新增 `line1/heartbeat` 心跳与 15s 离线判定
+   （自动生成 `R-DEV-OFFLINE` 事件）；`modbus_bridge.py` 把 Modbus 仪表读成 MQTT
+   （`--fake` 可在无硬件时跑通同一条链路）。
 
 ## 一键演示
 

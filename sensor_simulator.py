@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import paho.mqtt.client as mqtt
 
 TOPIC = "line1/telemetry"
+HEARTBEAT_TOPIC = "line1/heartbeat"
 BASELINE = {
     "temp": {"value": 68.0, "unit": "C", "noise": 1.2},
     "ch4": {"value": 0.30, "unit": "%", "noise": 0.03},
@@ -35,10 +36,12 @@ def now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
 
 
-def publish(client: mqtt.Client, sensor: str, value: float, unit: str, tick: int, scenario: str) -> None:
+def publish(client: mqtt.Client, sensor: str, value: float, unit: str, tick: int, scenario: str,
+            device: str) -> None:
     payload = {
         "ts": now(),
         "line": "line1",
+        "device_id": device,
         "sensor": sensor,
         "value": round(value, 2),
         "unit": unit,
@@ -48,11 +51,16 @@ def publish(client: mqtt.Client, sensor: str, value: float, unit: str, tick: int
     client.publish(TOPIC, json.dumps(payload, ensure_ascii=False), qos=0)
 
 
-def run_scenario(client: mqtt.Client, name: str, seed: int) -> None:
+def heartbeat(client: mqtt.Client, device: str) -> None:
+    payload = {"ts": now(), "device_id": device, "status": "online"}
+    client.publish(HEARTBEAT_TOPIC, json.dumps(payload, ensure_ascii=False), qos=0)
+
+
+def run_scenario(client: mqtt.Client, name: str, seed: int, device: str) -> None:
     spec = SCENARIOS[name]
     rng = random.Random(seed)
     steps = int(spec["duration"])
-    print(f"[sim] 注入场景 {name}：{steps}s，topic={TOPIC}")
+    print(f"[sim] 注入场景 {name}：{steps}s，device={device}，topic={TOPIC}")
 
     for tick in range(steps):
         ratio = tick / max(1, steps - 1)
@@ -66,10 +74,12 @@ def run_scenario(client: mqtt.Client, name: str, seed: int) -> None:
         ) * eased
         airflow = BASELINE["airflow"]["value"] - spec.get("airflow_drop", 0.0) * eased
 
-        publish(client, "ch4", max(0.01, ch4 + rng.uniform(-0.01, 0.01)), "%", tick, name)
-        publish(client, "temp", temp + rng.uniform(-0.4, 0.4), "C", tick, name)
-        publish(client, "co", BASELINE["co"]["value"] + rng.uniform(-0.8, 0.8), "ppm", tick, name)
-        publish(client, "airflow", max(0.1, airflow + rng.uniform(-0.03, 0.03)), "m3/s", tick, name)
+        publish(client, "ch4", max(0.01, ch4 + rng.uniform(-0.01, 0.01)), "%", tick, name, device)
+        publish(client, "temp", temp + rng.uniform(-0.4, 0.4), "C", tick, name, device)
+        publish(client, "co", BASELINE["co"]["value"] + rng.uniform(-0.8, 0.8), "ppm", tick, name, device)
+        publish(client, "airflow", max(0.1, airflow + rng.uniform(-0.03, 0.03)), "m3/s", tick, name, device)
+        if tick % 2 == 0:
+            heartbeat(client, device)
 
         if tick % 2 == 0:
             print(f"[sim] t={tick:02d}s ch4={ch4:.2f}% temp={temp:.1f}C airflow={airflow:.2f}")
@@ -78,16 +88,18 @@ def run_scenario(client: mqtt.Client, name: str, seed: int) -> None:
     print("[sim] 场景结束")
 
 
-def run_normal(client: mqtt.Client, seed: int) -> None:
+def run_normal(client: mqtt.Client, seed: int, device: str) -> None:
     rng = random.Random(seed)
     tick = 0
-    print(f"[sim] 正常模式，1 Hz 发布到 {TOPIC}（Ctrl+C 停止）")
+    print(f"[sim] 正常模式，1 Hz 发布到 {TOPIC}（device={device}，Ctrl+C 停止）")
     while True:
         wave = math.sin(tick / 30.0) * 0.6
-        publish(client, "temp", BASELINE["temp"]["value"] + wave + rng.uniform(-1, 1), "C", tick, "normal")
-        publish(client, "ch4", max(0.01, BASELINE["ch4"]["value"] + rng.uniform(-0.03, 0.03)), "%", tick, "normal")
-        publish(client, "co", BASELINE["co"]["value"] + rng.uniform(-1, 1), "ppm", tick, "normal")
-        publish(client, "airflow", BASELINE["airflow"]["value"] + rng.uniform(-0.05, 0.05), "m3/s", tick, "normal")
+        publish(client, "temp", BASELINE["temp"]["value"] + wave + rng.uniform(-1, 1), "C", tick, "normal", device)
+        publish(client, "ch4", max(0.01, BASELINE["ch4"]["value"] + rng.uniform(-0.03, 0.03)), "%", tick, "normal", device)
+        publish(client, "co", BASELINE["co"]["value"] + rng.uniform(-1, 1), "ppm", tick, "normal", device)
+        publish(client, "airflow", BASELINE["airflow"]["value"] + rng.uniform(-0.05, 0.05), "m3/s", tick, "normal", device)
+        if tick % 2 == 0:
+            heartbeat(client, device)
         tick += 1
         time.sleep(1.0)
 
@@ -97,6 +109,7 @@ def main() -> int:
     ap.add_argument("--mqtt", default="127.0.0.1:1883")
     ap.add_argument("--inject", default=None, choices=sorted(SCENARIOS))
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--device", default="line1-dev-01", help="设备编号，事件与心跳都带这个字段")
     args = ap.parse_args()
 
     host, _, port = args.mqtt.partition(":")
@@ -106,9 +119,9 @@ def main() -> int:
 
     try:
         if args.inject:
-            run_scenario(client, args.inject, args.seed)
+            run_scenario(client, args.inject, args.seed, args.device)
         else:
-            run_normal(client, args.seed)
+            run_normal(client, args.seed, args.device)
     except KeyboardInterrupt:
         print("\n[sim] 退出")
     finally:

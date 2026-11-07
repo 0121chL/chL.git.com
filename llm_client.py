@@ -17,6 +17,19 @@ class LLMUnavailable(RuntimeError):
     """Ollama 未启动 / 模型未拉取 —— 给出可操作的修复命令，而不是裸栈。"""
 
 
+# ollama | local（本地 transformers）| stub（仅测试）
+BACKEND = os.environ.get("LLM_BACKEND", "ollama")
+
+
+def set_backend(name: str) -> None:
+    global BACKEND
+    BACKEND = name
+
+
+def backend_name() -> str:
+    return BACKEND
+
+
 def _request(path: str, payload: dict[str, Any] | None = None, timeout: float = 10.0) -> dict[str, Any]:
     url = f"{BASE_URL}{path}"
     data = None
@@ -40,7 +53,17 @@ def list_models() -> list[str]:
 
 
 def ensure_ready(model: str | None = None) -> str:
-    """确认 Ollama 在线且模型存在；返回实际使用的模型名。"""
+    """确认后端可用；返回实际使用的模型名。"""
+    if BACKEND == "local":
+        import local_llm
+
+        if not local_llm.available():
+            raise LLMUnavailable(
+                f"本地模型目录不完整：{local_llm.MODEL_DIR}\n"
+                "  设置 LOCAL_MODEL_DIR，或改用 Ollama（LLM_BACKEND=ollama）"
+            )
+        return local_llm.model_name()
+
     name = model or MODEL
     models = list_models()
     base_names = {m.split(":")[0] for m in models} | set(models)
@@ -62,6 +85,15 @@ def chat(
     json_mode: bool = True,
 ) -> str:
     """一次非流式补全，返回 assistant 文本。"""
+    if BACKEND == "local":
+        import local_llm
+
+        started = time.perf_counter()
+        text = local_llm.chat(system, user, temperature=temperature)
+        _LAST_CALL["seconds"] = round(time.perf_counter() - started, 2)
+        _LAST_CALL["eval_count"] = len(text)
+        return text
+
     name = ensure_ready(model)
     payload: dict[str, Any] = {
         "model": name,

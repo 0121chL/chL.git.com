@@ -71,7 +71,7 @@ def make_event(tag: str) -> dict[str, Any]:
     }
 
 
-def wait_ready(event_id: str, timeout: float = 120) -> dict | None:
+def wait_ready(event_id: str, timeout: float = 320) -> dict | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         status, body = request("GET", f"/events/{event_id}", timeout=5)
@@ -93,7 +93,7 @@ def test_rest_and_idempotency() -> bool:
     check(body.get("thread_id") == eid, "thread_id == event_id", str(body.get("thread_id")))
 
     record = wait_ready(eid)
-    if not check(record is not None, "图停在 awaiting_approval（120s 内）", str((record or {}).get("status"))):
+    if not check(record is not None, "图停在 awaiting_approval（320s 内）", str((record or {}).get("status"))):
         return False
 
     analysis = (record or {}).get("analysis") or {}

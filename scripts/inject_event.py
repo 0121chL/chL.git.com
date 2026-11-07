@@ -76,6 +76,7 @@ def build_event(scenario: str) -> dict:
         "schema_version": 1,
         "line": "line1",
         "sensor": spec["sensor"],
+        "device_id": "line1-dev-01",
         "rule_id": spec["rule_id"],
         "event_type": spec["event_type"],
         "severity": spec["severity"],

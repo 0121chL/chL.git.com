@@ -36,7 +36,8 @@ THRESHOLDS = {
 }
 
 WINDOW = 90          # 秒，趋势窗口
-HISTORY = 180        # 每个传感器保留的采样点数
+HISTORY = 180        # 每个测点保留的采样点数
+DEFAULT_DEVICE = "line1-dev-01"
 last_fired: dict[str, float] = defaultdict(float)
 
 
@@ -67,6 +68,7 @@ def post_event(event: dict[str, Any], backend: str) -> bool:
 
 
 def make_event(
+    device_id: str,
     sensor: str,
     value: float,
     spec: dict[str, Any],
@@ -75,12 +77,13 @@ def make_event(
     severity: str | None = None,
 ) -> dict[str, Any]:
     unit = spec["unit"]
-    points = list(history[sensor])[-WINDOW:]
+    points = list(history[f"{device_id}:{sensor}"])[-WINDOW:]
     values = [p[1] for p in points] or [value]
     sensors = {}
-    for name, dq in history.items():
-        if not dq:
+    for key, dq in history.items():
+        if not dq or not key.startswith(f"{device_id}:"):
             continue
+        name = key.split(":", 1)[1]
         recent = list(dq)
         latest = recent[-1][1]
         cutoff = time.time() - 60
@@ -92,9 +95,10 @@ def make_event(
         }
 
     return {
-        "event_id": f"evt-{spec['rule_id'].lower()}-{int(time.time())}-{int(value * 100) % 1000:03d}",
+        "event_id": f"evt-{spec['rule_id'].lower()}-{device_id}-{int(time.time())}-{int(value * 100) % 1000:03d}",
         "schema_version": 1,
         "line": "line1",
+        "device_id": device_id,
         "sensor": sensor,
         "rule_id": spec["rule_id"],
         "event_type": event_type,
@@ -123,13 +127,14 @@ def main() -> int:
 
     host, _, port = args.mqtt.partition(":")
     history: dict[str, deque] = defaultdict(lambda: deque(maxlen=HISTORY))
-    last_emitted: dict[str, float] = defaultdict(float)  # 合并窗用：每传感器上次生效事件
+    last_emitted: dict[str, float] = defaultdict(float)  # 合并窗用：每设备+传感器上次生效事件
 
     def on_message(client, userdata, msg):  # noqa: ANN001
         try:
             reading = json.loads(msg.payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return
+        device = str(reading.get("device_id") or DEFAULT_DEVICE)
         sensor = reading.get("sensor")
         value = reading.get("value")
         if sensor is None or value is None:
@@ -140,42 +145,45 @@ def main() -> int:
             return
 
         now = time.time()
-        history[sensor].append((now, value))
+        key = f"{device}:{sensor}"
+        history[key].append((now, value))
         spec = THRESHOLDS.get(sensor)
         if not spec:
             return
 
         # 1) 阈值规则优先（同一读数只产出一条事件）
-        if value > spec["value"] and now - last_fired[spec["rule_id"]] > args.cooldown:
-            last_fired[spec["rule_id"]] = now
-            fire(make_event(sensor, value, spec, history, "threshold_exceeded"), sensor)
+        cooldown_key = f"{device}:{spec['rule_id']}"
+        if value > spec["value"] and now - last_fired[cooldown_key] > args.cooldown:
+            last_fired[cooldown_key] = now
+            fire(make_event(device, sensor, value, spec, history, "threshold_exceeded"), key)
             return
 
         # 2) 趋势规则：必须真的有窗口长度的历史，避免用首样本当基线造成早报
         if sensor == "ch4":
-            points = list(history["ch4"])
+            points = list(history[key])
             span = points[-1][0] - points[0][0] if points else 0.0
             if span >= args.trend_window:
                 older = [p for p in points if p[0] <= now - args.trend_window]
                 if older:
                     delta = value - older[-1][1]
-                    if delta >= 0.5 and now - last_fired["R-CH4-RISE"] > args.cooldown:
-                        last_fired["R-CH4-RISE"] = now
+                    rise_key = f"{device}:R-CH4-RISE"
+                    if delta >= 0.5 and now - last_fired[rise_key] > args.cooldown:
+                        last_fired[rise_key] = now
                         spec_rise = dict(spec, rule_id="R-CH4-RISE", severity="high")
-                        fire(make_event(sensor, value, spec_rise, history, "gas_surge"), sensor)
+                        fire(make_event(device, sensor, value, spec_rise, history, "gas_surge"), key)
 
-    def fire(event: dict[str, Any], sensor: str) -> None:
+    def fire(event: dict[str, Any], key: str) -> None:
         now = time.time()
-        gap = now - last_emitted[sensor]
+        gap = now - last_emitted[key]
         if gap < args.merge_window:
             print(
-                f"[rule] 合并：{event['rule_id']} 与 {gap:.1f}s 前的同传感器事件同源，抑制重复事件"
+                f"[rule] 合并：{event['rule_id']} 与 {gap:.1f}s 前的同测点事件同源，抑制重复事件"
             )
             return
-        last_emitted[sensor] = now
+        last_emitted[key] = now
         print(
-            f"[rule] 触发 {event['rule_id']} {event['sensor']}={event['observed']['value']}"
-            f"{event['observed']['unit']} -> {event['event_id']}"
+            f"[rule] 触发 {event['rule_id']} {event.get('device_id')} {event['sensor']}="
+            f"{event['observed']['value']}{event['observed']['unit']} -> {event['event_id']}"
         )
         append_event(event)
         post_event(event, args.backend)

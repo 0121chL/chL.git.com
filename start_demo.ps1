@@ -69,15 +69,20 @@ $ErrorActionPreference = "Stop"
 $mqRunning = Test-Port 1883
 Add-Result "Mosquitto :1883" $mqRunning $(if ($mqRunning) { "已监听" } else { "未运行，脚本会尝试启动" })
 
-# Ollama
+# Ollama（可选，缺失时用本地 3B 或离线模板）
 $ollamaOk = $false; $modelOk = $false
 try {
     $tags = Invoke-RestMethod "http://127.0.0.1:11434/api/tags" -TimeoutSec 3
     $ollamaOk = $true
     $modelOk = ($tags.models | ForEach-Object { $_.name }) -contains "qwen2.5:7b"
 } catch { }
-Add-Result "Ollama :11434" $ollamaOk $(if ($ollamaOk) { "在线" } else { "未运行 → 将回退离线模板" })
-Add-Result "模型 qwen2.5:7b" $modelOk $(if ($modelOk) { "已拉取" } else { "缺失：ollama pull qwen2.5:7b" })
+Add-Result "Ollama :11434" $ollamaOk $(if ($ollamaOk) { "在线" } else { "未运行（可选）" })
+Add-Result "模型 qwen2.5:7b" $modelOk $(if ($modelOk) { "已拉取" } else { "缺失（可选）" })
+
+# 本地 3B 模型
+$localModel = Join-Path $Root ".models\Qwen2.5-3B-Instruct\config.json"
+$localOk = Test-Path $localModel
+Add-Result "本地 Qwen2.5-3B" $localOk $(if ($localOk) { "已就绪（CPU 推理，约 1 分钟/次）" } else { "未下载，将使用离线模板" })
 
 # Node
 $nodeExe = Join-Path $NodeDir "node.exe"

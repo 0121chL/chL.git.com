@@ -21,6 +21,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -47,6 +48,8 @@ DB_PATH = os.environ.get("MONITOR_DB") or str(db.DEFAULT_DB_PATH)
 MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_TOPIC = os.environ.get("MQTT_EVENT_TOPIC", "line1/events")
+HEARTBEAT_TOPIC = os.environ.get("MQTT_HEARTBEAT_TOPIC", "line1/heartbeat")
+OFFLINE_TIMEOUT = float(os.environ.get("DEVICE_OFFLINE_TIMEOUT", "15"))
 HTTP_PORT = int(os.environ.get("BACKEND_PORT", "8000"))
 LOG_DIR = Path(__file__).resolve().parent / "data" / "logs"
 
@@ -57,6 +60,10 @@ PIPELINE_LOCK = threading.Lock()
 EVENTS: dict[str, dict[str, Any]] = {}          # event_id -> 内存状态
 EVENTS_LOCK = threading.Lock()
 EVENT_LOCKS: dict[str, threading.Lock] = {}
+
+DEVICES: dict[str, dict[str, Any]] = {}          # device_id -> 最近心跳/在线状态
+DEVICES_LOCK = threading.Lock()
+_DEVICE_STOP = threading.Event()
 
 STATE: dict[str, Any] = {
     "app": None,
@@ -86,6 +93,71 @@ def event_lock(event_id: str) -> threading.Lock:
         return EVENT_LOCKS.setdefault(event_id, threading.Lock())
 
 
+# --------------------------------------------------------------------------- #
+# 设备在线状态（心跳 → 离线判定）
+# --------------------------------------------------------------------------- #
+def touch_device(payload: dict[str, Any]) -> None:
+    """收到心跳或任意遥测：刷新 last_seen，必要时解除离线标记。"""
+    device = str(payload.get("device_id") or "unknown")
+    now = time.time()
+    with DEVICES_LOCK:
+        record = DEVICES.setdefault(
+            device, {"device_id": device, "offline": False, "offline_events": 0, "last_seen": now}
+        )
+        record["last_seen"] = now
+        record["last_seen_iso"] = utcnow()
+        if record["offline"]:
+            record["offline"] = False
+            print(f"[watchdog] {device} 心跳恢复", flush=True)
+
+
+def device_snapshot() -> list[dict[str, Any]]:
+    now = time.time()
+    with DEVICES_LOCK:
+        return [
+            {
+                "device_id": rec["device_id"],
+                "online": not rec["offline"],
+                "last_seen": rec.get("last_seen_iso"),
+                "silent_seconds": round(now - rec.get("last_seen", now), 1),
+                "offline_events": rec.get("offline_events", 0),
+            }
+            for rec in DEVICES.values()
+        ]
+
+
+def device_watchdog(stop: threading.Event) -> None:
+    """每 2 秒检查一次：超过 OFFLINE_TIMEOUT 没有心跳就产出一条“设备离线”事件。"""
+    while not stop.wait(2.0):
+        now = time.time()
+        for device, record in list(DEVICES.items()):
+            silent = now - record.get("last_seen", now)
+            if silent <= OFFLINE_TIMEOUT or record.get("offline"):
+                continue
+            record["offline"] = True
+            record["offline_events"] = record.get("offline_events", 0) + 1
+            event = {
+                "event_id": f"evt-offline-{device}-{int(now)}",
+                "schema_version": 1,
+                "line": "line1",
+                "device_id": device,
+                "sensor": "sensor",
+                "rule_id": "R-DEV-OFFLINE",
+                "event_type": "device_offline",
+                "severity": "medium",
+                "triggered_at": utcnow(),
+                "observed": {"value": round(silent, 1), "unit": "s", "threshold": OFFLINE_TIMEOUT},
+                "window": {"samples": 0, "mean": 0, "max": round(silent, 1), "slope_per_min": 0},
+                "snapshot": {"sensors": {}},
+                "scenario_id": "watchdog",
+            }
+            print(f"[watchdog] {device} 已 {silent:.0f}s 无心跳 → 生成离线事件", flush=True)
+            try:
+                _ingest(event, source="watchdog")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[watchdog] 离线事件投递失败: {exc}", flush=True)
+
+
 def counts() -> dict[str, int]:
     return {
         "events": db.count_events(DB_PATH),
@@ -104,6 +176,8 @@ def status_payload() -> dict[str, Any]:
         "subscribers": BUS.subscriber_count + WSBUS.subscriber_count,
         "memory_events": len(EVENTS),
         "checkpointer": STATE.get("checkpointer", "memory"),
+        "devices": device_snapshot(),
+        "offline_timeout_s": OFFLINE_TIMEOUT,
     }
 
 
@@ -136,13 +210,27 @@ def resolve_citations(analysis: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def pick_analyzer() -> tuple[str, str, Callable[[dict[str, Any]], dict[str, Any]]]:
-    try:
-        model = llm_client.ensure_ready()
-    except Exception:  # noqa: BLE001
-        return "offline-template", "—", offline_analyzer.analyze
-    if llm_client.is_stub():
-        return "ollama-stub", model, analyzer.analyze_event
-    return "ollama", model, analyzer.analyze_event
+    """选择分析后端：Ollama → 本地 transformers → 离线模板。"""
+    mode = os.environ.get("LLM_BACKEND", "auto")
+
+    if mode in ("auto", "ollama"):
+        try:
+            model = llm_client.ensure_ready()
+            if llm_client.is_stub():
+                return "ollama-stub", model, analyzer.analyze_event
+            return "ollama", model, analyzer.analyze_event
+        except Exception:  # noqa: BLE001
+            if mode == "ollama":
+                return "offline-template", "—", offline_analyzer.analyze
+
+    if mode in ("auto", "local"):
+        import local_llm
+
+        if local_llm.available():
+            llm_client.set_backend("local")
+            return "local-qwen", local_llm.model_name(), analyzer.analyze_event
+
+    return "offline-template", "—", offline_analyzer.analyze
 
 
 # --------------------------------------------------------------------------- #
@@ -364,15 +452,21 @@ async def lifespan(_: FastAPI):
         MQTT_PORT,
         MQTT_TOPIC,
         lambda ev: _ingest(ev, source="mqtt"),
+        heartbeat_topic=HEARTBEAT_TOPIC,
+        on_heartbeat=touch_device,
     )
     mqtt.start()
     STATE["mqtt"] = mqtt
 
+    watchdog = threading.Thread(target=device_watchdog, args=(_DEVICE_STOP,), name="device-watchdog", daemon=True)
+    watchdog.start()
+
     print(f"[backend] db={DB_PATH}")
     print(f"[backend] analyzer={source} model={model}")
-    print(f"[backend] mqtt={MQTT_HOST}:{MQTT_PORT} topic={MQTT_TOPIC}")
+    print(f"[backend] mqtt={MQTT_HOST}:{MQTT_PORT} topic={MQTT_TOPIC} heartbeat={HEARTBEAT_TOPIC}")
     print(f"[backend] http://127.0.0.1:{HTTP_PORT}  ws://127.0.0.1:{HTTP_PORT}/ws")
     yield
+    _DEVICE_STOP.set()
     mqtt.stop()
 
 

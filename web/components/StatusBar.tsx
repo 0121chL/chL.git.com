@@ -4,6 +4,7 @@ import type { StatusPayload } from "@/lib/types";
 
 const ANALYZER_LABEL: Record<string, { text: string; tone: "ok" | "warn" }> = {
   ollama: { text: "Ollama · qwen2.5:7b", tone: "ok" },
+  "local-qwen": { text: "Qwen2.5-3B（本地 CPU）", tone: "ok" },
   "ollama-stub": { text: "协议桩（非模型）", tone: "warn" },
   "offline-template": { text: "离线模板（非模型）", tone: "warn" },
 };
@@ -77,6 +78,11 @@ export function StatusBar({
           {status?.checkpointer ? (
             <Pill tone={status.checkpointer === "sqlite" ? "ok" : "warn"}>
               断点：{status.checkpointer === "sqlite" ? "SQLite 持久化" : "内存（重启丢失）"}
+            </Pill>
+          ) : null}
+          {status?.devices && status.devices.length > 0 ? (
+            <Pill tone={status.devices.every((d) => d.online) ? "ok" : "bad"}>
+              设备 {status.devices.filter((d) => d.online).length}/{status.devices.length} 在线
             </Pill>
           ) : null}
         </div>

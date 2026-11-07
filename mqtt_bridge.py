@@ -25,15 +25,20 @@ class MqttBridge:
         port: int,
         topic: str,
         on_event: Callable[[dict[str, Any]], None],
+        heartbeat_topic: str | None = None,
+        on_heartbeat: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.topic = topic
         self.on_event = on_event
+        self.heartbeat_topic = heartbeat_topic
+        self.on_heartbeat = on_heartbeat
         self.connected = False
         self.last_error: str | None = None
         self.last_message_at: str | None = None
         self.received = 0
+        self.heartbeats = 0
         self._client: Any = None
         self._thread: threading.Thread | None = None
 
@@ -69,6 +74,8 @@ class MqttBridge:
         self.last_error = None if ok else str(reason_code)
         if ok:
             client.subscribe(self.topic, qos=0)
+            if self.heartbeat_topic:
+                client.subscribe(self.heartbeat_topic, qos=0)
 
     def _on_disconnect(self, client, userdata, flags, reason_code=None, properties=None):  # noqa: ANN001
         self.connected = False
@@ -77,9 +84,21 @@ class MqttBridge:
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            self.last_error = f"非法事件 JSON: {exc}"
+            self.last_error = f"非法 JSON: {exc}"
             return
-        if not isinstance(payload, dict) or "event_id" not in payload:
+        if not isinstance(payload, dict):
+            return
+
+        if self.heartbeat_topic and msg.topic == self.heartbeat_topic:
+            self.heartbeats += 1
+            if self.on_heartbeat:
+                try:
+                    self.on_heartbeat(payload)
+                except Exception as exc:  # noqa: BLE001
+                    self.last_error = f"心跳处理异常: {exc}"
+            return
+
+        if "event_id" not in payload:
             self.last_error = "事件缺少 event_id"
             return
         self.received += 1
@@ -96,7 +115,9 @@ class MqttBridge:
             "available": HAVE_PAHO,
             "broker": f"{self.host}:{self.port}",
             "topic": self.topic,
+            "heartbeat_topic": self.heartbeat_topic,
             "received": self.received,
+            "heartbeats": self.heartbeats,
             "last_error": self.last_error,
         }
 

@@ -1,0 +1,27 @@
+{
+  "mqtt": {
+    "host": "127.0.0.1",
+    "port": 1883,
+    "telemetry_topic": "line1/telemetry",
+    "heartbeat_topic": "line1/heartbeat"
+  },
+  "poll_interval_s": 1.0,
+  "heartbeat_interval_s": 2.0,
+  "devices": [
+    {
+      "device_id": "line1-dev-01",
+      "line": "line1",
+      "mode": "tcp",
+      "host": "127.0.0.1",
+      "port": 502,
+      "unit": 1,
+      "points": [
+        { "sensor": "ch4", "address": 0, "count": 1, "scale": 0.01, "offset": 0, "unit": "%" },
+        { "sensor": "temp", "address": 1, "count": 1, "scale": 0.1, "offset": 0, "unit": "C" },
+        { "sensor": "co", "address": 2, "count": 1, "scale": 0.1, "offset": 0, "unit": "ppm" },
+        { "sensor": "vibration", "address": 3, "count": 1, "scale": 0.01, "offset": 0, "unit": "mm/s" },
+        { "sensor": "airflow", "address": 4, "count": 1, "scale": 0.01, "offset": 0, "unit": "m3/s" }
+      ]
+    }
+  ]
+}

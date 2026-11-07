@@ -66,8 +66,14 @@ export function EventCard({
         <span className="truncate font-mono text-sm font-semibold">{event.rule_id ?? "—"}</span>
         <span className="shrink-0 font-mono text-[11px] text-slate-500">{clock(event.triggered_at)}</span>
       </div>
-      <div className="mt-0.5 text-[11px] text-slate-500">
-        {event.event_type ?? "—"} · event_id {record.event_id}
+      <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-500">
+        <span>{event.event_type ?? "—"}</span>
+        {event.device_id ? (
+          <span className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[10px] text-slate-600">
+            {event.device_id}
+          </span>
+        ) : null}
+        <span className="truncate">· event_id {record.event_id}</span>
       </div>
 
       <div className="mt-2 rounded bg-slate-50 px-2 py-1.5 text-xs">

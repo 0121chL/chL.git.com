@@ -78,7 +78,7 @@ try {
       );
       return panels.some((p) => p.innerText.includes(id) && p.innerText.includes("规程依据"));
     },
-    { timeout: 60000 },
+    { timeout: 420000 },
     eventId,
   );
   console.log("[browser] ✓ Agent 分析卡出现");

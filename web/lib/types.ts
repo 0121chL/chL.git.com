@@ -10,6 +10,7 @@ export interface SensorSnapshot {
 
 export interface RuleEvent {
   event_id: string;
+  device_id?: string;
   rule_id?: string;
   event_type?: string;
   severity?: Severity;
@@ -68,6 +69,16 @@ export interface StatusPayload {
   counts: { events: number; pending: number; work_orders: number };
   subscribers?: number;
   checkpointer?: string;
+  devices?: DeviceState[];
+  offline_timeout_s?: number;
+}
+
+export interface DeviceState {
+  device_id: string;
+  online: boolean;
+  last_seen?: string | null;
+  silent_seconds?: number;
+  offline_events?: number;
 }
 
 export type StreamMessage =

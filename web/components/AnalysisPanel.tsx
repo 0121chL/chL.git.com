@@ -51,7 +51,7 @@ export function AnalysisPanel({
         <div className="min-w-0">
           <h2 className="text-sm font-semibold">Agent 分析</h2>
           <p className="mt-0.5 truncate font-mono text-[11px] text-slate-500">
-            {record.event.rule_id ?? "—"} · {record.event_id}
+            {record.event.rule_id ?? "—"} · {record.event.device_id ?? "未标注设备"} · {record.event_id}
           </p>
         </div>
         {risk ? (

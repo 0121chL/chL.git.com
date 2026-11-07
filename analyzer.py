@@ -41,6 +41,7 @@ SENSOR_TERMS = {
     "airflow": "风量 通风 微风 无风 局部通风机",
     "o2": "氧气 有限空间 检测",
     "h2s": "硫化氢 有限空间 中毒",
+    "sensor": "传感器 断线 离线 故障 调校 人工检测 监控设备",
 }
 
 EVENT_TYPE_TERMS = {
@@ -48,6 +49,7 @@ EVENT_TYPE_TERMS = {
     "trend_warning": "持续上升 轴承 温升 趋势",
     "gas_surge": "瓦斯涌出 异常 撤人 加强通风",
     "sensor_fault": "传感器 故障 校验",
+    "device_offline": "离线 断线 故障 人工检测 调校",
 }
 
 
@@ -109,10 +111,16 @@ def parse_analysis(raw: str) -> dict[str, Any]:
     if risk not in VALID_RISK_LEVELS:
         raise GroundingError(f"risk_level 非法：{risk!r}，允许 {VALID_RISK_LEVELS}")
 
+    def as_text(value: Any) -> str:
+        # 小模型常把列表当字符串返回（"['...']"），这里统一拼成中文分号分隔的文本
+        if isinstance(value, (list, tuple)):
+            return "；".join(str(item).strip() for item in value if str(item).strip())
+        return str(value).strip()
+
     return {
-        "root_cause_hypothesis": str(data["root_cause_hypothesis"]).strip(),
-        "regulation_basis": str(data["regulation_basis"]).strip(),
-        "recommended_action": str(data["recommended_action"]).strip(),
+        "root_cause_hypothesis": as_text(data["root_cause_hypothesis"]),
+        "regulation_basis": as_text(data["regulation_basis"]),
+        "recommended_action": as_text(data["recommended_action"]),
         "risk_level": risk,
     }
 
