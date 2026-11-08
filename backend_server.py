@@ -675,6 +675,18 @@ def _ingest(event: dict[str, Any], source: str = "http") -> dict[str, Any]:
     event_id = str(event.get("event_id") or f"evt-{uuid.uuid4().hex[:12]}")
     event["event_id"] = event_id
 
+    # 来源标记：规则引擎 / 看门狗 / 手工直投。前端据此渲染徽标，
+    # 避免把联调用的直投事件误当成真实规则产出。
+    origin = event.get("origin") or {
+        "rule_engine": "rule_engine",
+        "mqtt": "rule_engine",
+        "watchdog": "watchdog",
+        "dev": "manual",
+    }.get(source, source)
+    event["origin"] = origin
+    if origin == "manual":
+        inc("manual_injected_total")
+
     with EVENTS_LOCK:
         if event_id in EVENTS:
             return {"accepted": False, "duplicate": True, "event_id": event_id, "thread_id": event_id}
@@ -684,6 +696,7 @@ def _ingest(event: dict[str, Any], source: str = "http") -> dict[str, Any]:
             "event": event,
             "status": "received",
             "source": source,
+            "origin": origin,
             "received_at": utcnow(),
         }
 

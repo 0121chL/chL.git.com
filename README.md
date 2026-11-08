@@ -23,6 +23,26 @@ safe-monitor-agent
 └─ .models/                Qwen2.5-3B-Instruct（约 6.2 GB，已 gitignore）
 ```
 
+## 数据从哪来（没有真实传感器）
+
+全部是程序合成的，但**合成发生在最底层**，上层判定是真实逻辑：
+
+| 层 | 来源 | 说明 |
+|---|---|---|
+| 遥测 | `sensor_simulator.py` | 1 Hz 发 ch4/temp/co/airflow/vibration，基线 + 正弦 + 随机噪声；`--inject ch4_rise` 用 smoothstep 同时抬 ch4、抬 temp、降风量 |
+| 事件 | `rule_engine.py` | 按 `config/rules.json` 阈值/趋势真实判定，事件里的 `delta_1m` 由历史窗口算出，不是手写 |
+| 分析 | `analyzer.py` | 检索 17 条规程 + 本地 3B / Ollama / 离线模板；条条款号可回查 |
+| 工单 | 人工批准后写 SQLite | 带审批人、审批意见、审批时间 |
+
+事件上有一个 `origin` 字段区分来源：`rule_engine`（遥测→规则）、`watchdog`（设备离线）、
+`manual`（联调用直投）。前端对 `manual` 显示黄色「手工注入」、对 `watchdog` 显示「看门狗」，
+避免把联调数据误当成真实判定。
+
+```powershell
+python scripts\inject_event.py --scenario gas_surge            # 默认走遥测→规则引擎
+python scripts\inject_event.py --scenario gas_surge --direct   # 直投一条事件（origin=manual）
+```
+
 ## 阶段与文档
 
 | 阶段 | 内容 | 文档 | 验收 |

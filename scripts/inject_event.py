@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""演示事件注入：优先走 MQTT（line1/events），broker 不在时回退到后端 HTTP 注入。
+"""演示触发：默认走**真实链路**——发布遥测 → 规则引擎判定 → 事件。
 
-    python scripts/inject_event.py --scenario gas_surge
-    python scripts/inject_event.py --scenario temp_high --mqtt 127.0.0.1:1883
-    python scripts/inject_event.py --scenario gas_surge --http      # 强制 HTTP
+    python scripts/inject_event.py --scenario gas_surge     # 走遥测（推荐）
+    python scripts/inject_event.py --scenario gas_surge --direct   # 直投事件，标记为「手工注入」
+
+默认模式只是把场景翻译成 `sensor_simulator --inject`，事件由规则引擎按阈值/趋势
+真实产出；`--direct` 是把一条事件直接塞进后端，仅用于联调，事件带 `origin=manual`，
+前端会显示「手工注入」徽标，避免和规则引擎产出的事件混淆。
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import subprocess
 import sys
 import time
 import urllib.error
@@ -21,9 +25,18 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
+ROOT = Path(__file__).resolve().parent.parent
 TOPIC = "line1/events"
 BACKEND = "http://127.0.0.1:8000"
 
+# 场景 → 模拟器脚本（遥测注入）
+SIMULATOR_SCENARIO = {
+    "gas_surge": "ch4_rise",
+    "temp_high": "temp_spike",
+    "vib_warn": "vib_spike",
+}
+
+# 仅 --direct 时使用的预置事件
 SCENARIOS: dict[str, dict] = {
     "gas_surge": {
         "rule_id": "R-CH4-RISE",
@@ -53,8 +66,8 @@ SCENARIOS: dict[str, dict] = {
         },
     },
     "vib_warn": {
-        "rule_id": "R-VIB-TREND",
-        "event_type": "trend_warning",
+        "rule_id": "R-VIB-HIGH",
+        "event_type": "threshold_exceeded",
         "sensor": "vibration",
         "severity": "medium",
         "observed": {"value": 4.8, "unit": "mm/s", "threshold": 4.5},
@@ -70,11 +83,12 @@ SCENARIOS: dict[str, dict] = {
 def build_event(scenario: str) -> dict:
     spec = SCENARIOS[scenario]
     now = datetime.now(timezone.utc).astimezone()
-    event_id = f"evt-{scenario}-{int(time.time())}-{random.randint(1000, 9999)}"
+    event_id = f"evt-manual-{scenario}-{int(time.time())}-{random.randint(1000, 9999)}"
     return {
         "event_id": event_id,
         "schema_version": 1,
         "line": "line1",
+        "origin": "manual",
         "sensor": spec["sensor"],
         "device_id": "line1-dev-01",
         "rule_id": spec["rule_id"],
@@ -87,6 +101,21 @@ def build_event(scenario: str) -> dict:
         "scenario_id": scenario,
         "tick": random.randint(1, 999),
     }
+
+
+def run_simulator(scene: str, device: str) -> int:
+    print(f"[inject] 走遥测链路：sensor_simulator --inject {scene}——事件将由规则引擎产出")
+    cmd = [
+        sys.executable,
+        "-X",
+        "utf8",
+        str(ROOT / "sensor_simulator.py"),
+        "--inject",
+        scene,
+        "--device",
+        device,
+    ]
+    return subprocess.call(cmd, cwd=str(ROOT))
 
 
 def publish_mqtt(event: dict, host: str, port: int) -> bool:
@@ -128,15 +157,21 @@ def publish_http(event: dict, backend: str) -> bool:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="注入演示事件")
+    ap = argparse.ArgumentParser(description="演示触发")
     ap.add_argument("--scenario", default="gas_surge", choices=sorted(SCENARIOS))
+    ap.add_argument("--device", default="line1-dev-01")
     ap.add_argument("--mqtt", default="127.0.0.1:1883", help="host:port")
     ap.add_argument("--backend", default=BACKEND)
-    ap.add_argument("--http", action="store_true", help="跳过 MQTT，直接走 HTTP")
+    ap.add_argument("--direct", action="store_true",
+                    help="跳过遥测/规则引擎，直接投一条事件（标 origin=manual）")
+    ap.add_argument("--http", action="store_true", help="--direct 时强制走 HTTP")
     args = ap.parse_args()
 
+    if not args.direct:
+        return run_simulator(SIMULATOR_SCENARIO[args.scenario], args.device)
+
     event = build_event(args.scenario)
-    print(f"[inject] 事件 {event['event_id']}  scenario={args.scenario}")
+    print(f"[inject] 直投事件 {event['event_id']}（origin=manual，前端会标「手工注入」）")
     print(json.dumps(event, ensure_ascii=False, indent=2))
 
     if not args.http:
@@ -147,7 +182,7 @@ def main() -> int:
 
     if publish_http(event, args.backend):
         return 0
-    print("[inject] MQTT 与 HTTP 都不可用：请先启动 mosquitto 或 server.py")
+    print("[inject] MQTT 与 HTTP 都不可用：请先启动 mosquitto 或 backend_server.py")
     return 1
 
 

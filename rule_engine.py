@@ -184,6 +184,7 @@ def main() -> int:
             "event_id": f"evt-{(rule_id or spec['rule_id']).lower()}-{device}-{int(time.time())}-{int(value * 100) % 1000:03d}",
             "schema_version": 1,
             "line": "line1",
+            "origin": "rule_engine",
             "device_id": device,
             "sensor": sensor,
             "rule_id": rule_id or spec["rule_id"],

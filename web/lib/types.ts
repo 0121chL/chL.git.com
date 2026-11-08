@@ -11,6 +11,7 @@ export interface SensorSnapshot {
 export interface RuleEvent {
   event_id: string;
   device_id?: string;
+  origin?: "rule_engine" | "manual" | "watchdog" | string;
   rule_id?: string;
   event_type?: string;
   severity?: Severity;

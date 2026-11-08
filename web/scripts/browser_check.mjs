@@ -21,10 +21,14 @@ const existingId = process.argv.includes("--event-id")
   : null;
 
 function inject() {
-  const res = spawnSync("python", ["scripts/inject_event.py", "--scenario", scenario, "--http"], {
-    cwd: "F:\\deepseek\\wenjian\\safe-monitor-agent",
-    encoding: "utf8",
-  });
+  const res = spawnSync(
+    "python",
+    ["scripts/inject_event.py", "--scenario", scenario, "--http", "--direct"],
+    {
+      cwd: "F:\\deepseek\\wenjian\\safe-monitor-agent",
+      encoding: "utf8",
+    },
+  );
   const m = /"event_id":\s*"([^"]+)"/.exec(res.stdout ?? "");
   if (!m) throw new Error(`注入失败：${res.stdout}\n${res.stderr}`);
   return m[1];
