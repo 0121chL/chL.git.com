@@ -12,6 +12,7 @@ const arg = (name, fallback) => {
 };
 const eventId = arg("--event", "");
 const out = arg("--out", "F:\\deepseek\\wenjian\\safe-monitor-agent\\data\\p4-approved.png");
+const loginShot = process.argv.includes("--login");
 
 const browser = await puppeteer.launch({
   executablePath: EDGE,
@@ -22,6 +23,43 @@ const browser = await puppeteer.launch({
 });
 const page = await browser.newPage();
 await page.setViewport({ width: 1440, height: 1250 });
+
+// 截图前先用 API 拿一个会话，塞进 localStorage，避免被登录页挡住
+const BACKEND = "http://127.0.0.1:8000";
+if (loginShot) {
+  await page.evaluateOnNewDocument(() => localStorage.clear());
+  await page.goto(`${APP}login`, { waitUntil: "networkidle2", timeout: 45000 });
+  await page.waitForFunction(() => document.body.innerText.includes("登录后才能查看事件"), {
+    timeout: 20000,
+  });
+  await page.screenshot({ path: out });
+  console.log("SHOT OK:", out);
+  await browser.close();
+  process.exit(0);
+}
+const uname = `shot${Date.now().toString().slice(-6)}`;
+let authRes = await fetch(`${BACKEND}/api/auth/register`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ username: uname, password: "test123456" }),
+});
+if (authRes.status === 409) {
+  authRes = await fetch(`${BACKEND}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: uname, password: "test123456" }),
+  });
+}
+const session = await authRes.json();
+await page.evaluateOnNewDocument(
+  (token, user) => {
+    localStorage.setItem("sm_token", token);
+    localStorage.setItem("sm_user", JSON.stringify({ username: user }));
+  },
+  session.token,
+  uname,
+);
+
 await page.goto(APP, { waitUntil: "networkidle2", timeout: 45000 });
 await page.waitForFunction(() => document.body.innerText.includes("规则事件"), { timeout: 30000 });
 

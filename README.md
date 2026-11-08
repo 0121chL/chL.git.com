@@ -92,6 +92,25 @@ python scripts\inject_event.py --scenario gas_surge --direct   # 直投一条事
 
 窗口里会打印每个服务的地址与日志位置；失败时停在窗口里显示原因（`data\logs\*.err`）。
 
+## 登录与账号
+
+看板默认需要登录：未登录访问会被重定向到 `/login`，**所有写操作（审批、拒绝、重试、注入）都要求会话 token**。
+
+- 首次使用点「注册」创建账号（用户名 3–32 位，密码 ≥6 位），注册后自动登录；
+- 密码用 PBKDF2-SHA256（20 万轮）加盐存储，token 随机 32 字节，会话默认 7 天；
+- 审批人取**当前登录用户**，前端不再自由填写，工单表里记录的就是账号名；
+- 账号与会话存在 SQLite（`users` / `sessions` 表），重启不丢；
+- 右上角显示当前用户，可「退出」。
+
+事件卡与工单表显示中文名称（甲烷浓度上升 / 甲烷超限 / 温度超限 / 振动超限 / 设备离线 …），
+规则编号以小字保留在下方，映射在 `web/lib/labels.ts`。
+
+```powershell
+# 脚本/验收需要会话时可以这么做（或直接设 API_TOKEN 走服务令牌）
+curl.exe -s -X POST http://127.0.0.1:8000/api/auth/register ^
+  -H "Content-Type: application/json" -d "{\"username\":\"demo\",\"password\":\"demo123456\"}"
+```
+
 ## 手动启动（默认方式，详见 `START-MANUAL.md`）
 
 本项目不注册任何开机自启：没有计划任务、没有启动项、没有守护进程。
@@ -112,11 +131,11 @@ Set-Service -Name mosquitto -StartupType Manual
 | 2 | 无原始时序 | 遥测落 SQLite `telemetry` 表（默认保留 24h，每小时清理）；`GET /api/telemetry` 查询；分析卡新增「遥测趋势」折线（最近 30 分钟，15s 刷新） | 注入后 `points=40`，图表 30 点 |
 | 3 | 分析串行、慢 | 分析并发信号量 + `ANALYSIS_TIMEOUT_S` 超时降级（超时自动改离线模板）；图操作单独加锁，审批不再被分析阻塞 | `/metrics` 的 `analysis_timeout_total` |
 | 4 | 不是真 Agent | 图加 `plan → tools → analyze`：按策略调用 `get_device_status` / `get_recent_events`，工具结果进提示词 | `/metrics` 的 `tool_calls_total` |
-| 5 | 审批语义弱 | 审批人必填（≥2 字，否则 422）；`APPROVAL_TIMEOUT_S` 默认 600s，超时升级告警（不自动批）；重复调用 409 优先于 422 | `p5_acceptance` 25/25 |
+| 5 | 审批语义弱 | 审批人 = 登录用户（不可冒名），审批必须带会话；`APPROVAL_TIMEOUT_S` 默认 600s，超时升级告警（不自动批）；重复调用 409 优先于 422 | `p5_acceptance` 25/25 |
 | 6 | 规则硬编码 | 阈值/单位/趋势全部移到 `config/rules.json`，新增 co 规则；`--rules` 可换配置 | `tests/test_rules.py` |
 | 7 | 失败不闭环 | `POST /events/{id}/reanalyze` 重试；前端「重试分析」按钮；高危/离线事件写 `data/alerts.jsonl`，可配 `ALERT_WEBHOOK` | `GET /api/alerts` |
 | 8 | 可观测性弱 | `GET /metrics`（Prometheus 文本）：事件/分析/超时/工具/告警/队列/在线设备/spool | 实测见下表 |
-| 9 | 无鉴权 | 设置 `API_TOKEN` 后写接口需 `Authorization: Bearer`；前端用 `NEXT_PUBLIC_API_TOKEN` | 实测 401 / 202 |
+| 9 | 无鉴权 | 登录/注册 + 会话 token（SQLite），写接口需会话；`API_TOKEN` 作为脚本用服务令牌 | 实测 401 / 200 |
 | 10 | 无单测 | `tests/` 22 个用例（解析/接地/检索/DB/规则），`pytest -q` 8.5s | 22 passed |
 
 新增环境变量：
@@ -126,6 +145,7 @@ API_TOKEN=             # 非空则写接口需要 Bearer token
 ANALYSIS_TIMEOUT_S=0   # >0 时分析超时降级为离线模板
 ANALYSIS_CONCURRENCY=1 # 允许并发的分析数（CPU 3B 建议保持 1）
 APPROVAL_TIMEOUT_S=600 # 待审批超时写告警（默认 10 分钟，不自动批准）
+AUTH_TTL_DAYS=7        # 登录会话有效期（天）
 ALERT_WEBHOOK=         # 可选：告警 POST 到该地址
 DEVICE_OFFLINE_TIMEOUT=15
 ```

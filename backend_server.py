@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -30,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -39,6 +40,7 @@ from pydantic import BaseModel
 
 import agent_graph as ag
 import analyzer
+import auth
 import db
 import llm_client
 import offline_analyzer
@@ -53,6 +55,7 @@ MQTT_TOPIC = os.environ.get("MQTT_EVENT_TOPIC", "line1/events")
 HEARTBEAT_TOPIC = os.environ.get("MQTT_HEARTBEAT_TOPIC", "line1/heartbeat")
 OFFLINE_TIMEOUT = float(os.environ.get("DEVICE_OFFLINE_TIMEOUT", "15"))
 APPROVAL_TIMEOUT = float(os.environ.get("APPROVAL_TIMEOUT_S", "600"))  # 默认 10 分钟未审批升级告警
+AUTH_TTL_DAYS = int(os.environ.get("AUTH_TTL_DAYS", "7"))
 HTTP_PORT = int(os.environ.get("BACKEND_PORT", "8000"))
 LOG_DIR = Path(__file__).resolve().parent / "data" / "logs"
 
@@ -124,11 +127,34 @@ def metrics_text() -> str:
     return "# 安全监测 Agent Demo metrics\n" + body + "\n" + "\n".join(extra) + "\n"
 
 
-def require_auth(authorization: str | None = Header(default=None)) -> None:
-    if not API_TOKEN:
+def _bearer(authorization: str | None) -> str:
+    token = (authorization or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token
+
+
+def require_auth(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """写操作必须登录：接受会话 token 或（脚本用）API_TOKEN。"""
+    token = _bearer(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="请先登录")
+    if API_TOKEN and token == API_TOKEN:
+        return {"id": 0, "username": "service", "role": "service"}
+    user = db.get_session_user(DB_PATH, token)
+    if not user:
+        raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+    return user
+
+
+def require_ingest(request: Request, authorization: str | None = Header(default=None)) -> None:
+    """事件入口：本机进程（规则引擎/看门狗）可直投，其余需要 API_TOKEN。"""
+    host = request.client.host if request.client else ""
+    if host in ("127.0.0.1", "::1", "localhost"):
         return
-    if authorization != f"Bearer {API_TOKEN}":
-        raise HTTPException(status_code=401, detail="缺少或非法 Authorization: Bearer <token>")
+    if API_TOKEN and _bearer(authorization) == API_TOKEN:
+        return
+    raise HTTPException(status_code=401, detail="事件入口仅限本机或携带 API_TOKEN")
 
 
 def emit_alert(event: dict[str, Any], analysis: dict[str, Any]) -> None:
@@ -714,9 +740,64 @@ app.add_middleware(
 
 
 # --------------------------------------------------------------------------- #
+# 登录 / 注册
+# --------------------------------------------------------------------------- #
+USERNAME_RE = re.compile(r"^[\w\u4e00-\u9fa5.\-]{3,32}$")
+
+
+class AuthBody(BaseModel):
+    username: str
+    password: str
+
+
+def _issue_token(user: dict[str, Any]) -> dict[str, Any]:
+    token = auth.new_token()
+    session = db.create_session(DB_PATH, token, int(user["id"]), AUTH_TTL_DAYS)
+    return {"token": token, "expires_at": session["expires_at"], "user": user}
+
+
+@app.post("/api/auth/register")
+def register(body: AuthBody) -> dict[str, Any]:
+    username = body.username.strip()
+    if not USERNAME_RE.match(username):
+        raise HTTPException(status_code=422, detail="用户名 3–32 位，仅限字母/数字/下划线/汉字/点/横线")
+    if len(body.password) < 6:
+        raise HTTPException(status_code=422, detail="密码至少 6 位")
+    if db.get_user(DB_PATH, username):
+        raise HTTPException(status_code=409, detail="用户名已存在，请直接登录")
+
+    salt, hashed = auth.hash_password(body.password)
+    user = db.create_user(DB_PATH, username, salt, hashed)
+    inc("users_registered_total")
+    return _issue_token(user)
+
+
+@app.post("/api/auth/login")
+def login(body: AuthBody) -> dict[str, Any]:
+    user = db.get_user(DB_PATH, body.username.strip())
+    if not user or not auth.verify_password(body.password, user["password_salt"], user["password_hash"]):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    inc("users_login_total")
+    return _issue_token({"id": user["id"], "username": user["username"], "role": user["role"]})
+
+
+@app.get("/api/auth/me")
+def me(user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    return {"user": user}
+
+
+@app.post("/api/auth/logout")
+def logout(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    token = _bearer(authorization)
+    if token and token != API_TOKEN:
+        db.delete_session(DB_PATH, token)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
 # P5 契约
 # --------------------------------------------------------------------------- #
-@app.post("/events", status_code=202, dependencies=[Depends(require_auth)])
+@app.post("/events", status_code=202, dependencies=[Depends(require_ingest)])
 def post_event(event: dict[str, Any]) -> dict[str, Any]:
     return _ingest(event, source="rule_engine")
 
@@ -736,16 +817,25 @@ def reanalyze_event(event_id: str) -> dict[str, Any]:
     return {"ok": True, "event_id": event_id, "status": "queued"}
 
 
-@app.post("/approve/{event_id}", dependencies=[Depends(require_auth)])
-def approve(event_id: str, body: DecisionBody | None = None) -> dict[str, Any]:
+@app.post("/approve/{event_id}")
+def approve(
+    event_id: str,
+    body: DecisionBody | None = None,
+    user: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
     body = body or DecisionBody()
-    return _decide(event_id, "approve", body.approver, body.comment)
+    # 审批人取登录用户，前端不再自由填写，避免冒名
+    return _decide(event_id, "approve", user["username"], body.comment)
 
 
-@app.post("/reject/{event_id}", dependencies=[Depends(require_auth)])
-def reject(event_id: str, body: DecisionBody | None = None) -> dict[str, Any]:
+@app.post("/reject/{event_id}")
+def reject(
+    event_id: str,
+    body: DecisionBody | None = None,
+    user: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
     body = body or DecisionBody()
-    return _decide(event_id, "reject", body.approver, body.comment)
+    return _decide(event_id, "reject", user["username"], body.comment)
 
 
 @app.get("/work_orders")
@@ -871,16 +961,19 @@ async def api_stream() -> StreamingResponse:
     )
 
 
-@app.post("/api/approvals/{event_id}", dependencies=[Depends(require_auth)])
-def api_approval(event_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+@app.post("/api/approvals/{event_id}")
+def api_approval(
+    event_id: str,
+    body: dict[str, Any] | None = None,
+    user: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
     payload = body or {}
     decision = str(payload.get("decision", "approve")).strip().lower()
-    approver = payload.get("approver")
     comment = payload.get("comment")
     if decision in {"approve", "approved", "批准", "同意"}:
-        return _decide(event_id, "approve", approver, comment)
+        return _decide(event_id, "approve", user["username"], comment)
     if decision in {"reject", "rejected", "驳回", "拒绝"}:
-        return _decide(event_id, "reject", approver, comment)
+        return _decide(event_id, "reject", user["username"], comment)
     raise HTTPException(status_code=422, detail=f"非法 decision: {decision!r}")
 
 

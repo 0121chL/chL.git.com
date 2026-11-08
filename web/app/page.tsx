@@ -1,15 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { AnalysisPanel } from "@/components/AnalysisPanel";
 import { EventList } from "@/components/EventList";
 import { StatusBar } from "@/components/StatusBar";
 import { WorkOrderTable } from "@/components/WorkOrderTable";
-import { API_BASE, postApproval, retryAnalysis } from "@/lib/api";
+import { API_BASE, fetchMe, logout, postApproval, retryAnalysis } from "@/lib/api";
+import { clearSession, getToken, type SessionUser } from "@/lib/auth";
 import type { EventRecord, StatusPayload, StreamMessage, WorkOrder } from "@/lib/types";
 
 export default function DashboardPage() {
+  const router = useRouter();
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [checking, setChecking] = useState(true);
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [orders, setOrders] = useState<WorkOrder[]>([]);
@@ -17,6 +22,27 @@ export default function DashboardPage() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [sseConnected, setSseConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // 未登录直接去 /login；token 失效也清掉
+  useEffect(() => {
+    if (!getToken()) {
+      router.replace("/login");
+      return;
+    }
+    fetchMe()
+      .then((u) => setUser(u))
+      .catch(() => {
+        clearSession();
+        router.replace("/login");
+      })
+      .finally(() => setChecking(false));
+  }, [router]);
+
+  const signOut = useCallback(async () => {
+    await logout();
+    clearSession();
+    router.replace("/login");
+  }, [router]);
 
   const upsertEvent = useCallback((record: EventRecord) => {
     setEvents((prev) => {
@@ -149,13 +175,13 @@ export default function DashboardPage() {
   }, [selected, patchEvent]);
 
   const decide = useCallback(
-    async (decision: "approve" | "reject", approver: string, comment: string) => {
+    async (decision: "approve" | "reject", comment: string) => {
       if (!selected) return;
       setBusyId(selected.event_id);
       setError(null);
       try {
-        // 只提交请求；工单必须由后端落库后经 SSE 推回来
-        await postApproval(selected.event_id, decision, { approver, comment });
+        // 审批人由后端从登录会话取，前端只提交决定与意见
+        await postApproval(selected.event_id, decision, { comment });
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -165,9 +191,24 @@ export default function DashboardPage() {
     [selected],
   );
 
+  if (checking) {
+    return (
+      <main className="flex min-h-screen items-center justify-center text-sm text-slate-500">
+        正在校验登录状态…
+      </main>
+    );
+  }
+  if (!user) return null;
+
   return (
     <div className="min-h-screen">
-      <StatusBar status={status} sseConnected={sseConnected} lastError={error} />
+      <StatusBar
+        status={status}
+        sseConnected={sseConnected}
+        lastError={error}
+        username={user.username}
+        onSignOut={signOut}
+      />
 
       <main className="mx-auto max-w-[1400px] px-5 py-4">
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
@@ -178,6 +219,7 @@ export default function DashboardPage() {
             <AnalysisPanel
               record={selected}
               busy={busyId === selected?.event_id}
+              approver={user.username}
               onDecide={decide}
               onRetry={retry}
             />

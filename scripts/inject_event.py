@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import subprocess
 import sys
@@ -141,10 +142,14 @@ def publish_mqtt(event: dict, host: str, port: int) -> bool:
 
 
 def publish_http(event: dict, backend: str) -> bool:
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("INJECT_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         f"{backend}/api/dev/inject",
         data=json.dumps(event, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:

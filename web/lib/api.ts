@@ -1,14 +1,14 @@
+import { authHeaders, getToken, type SessionUser } from "./auth";
+import type { TelemetryPoint } from "./types";
+
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
 
-import type { TelemetryPoint } from "./types";
-
-/** 设置 API_TOKEN 时，前端用这个头访问写接口 */
-const TOKEN = process.env.NEXT_PUBLIC_API_TOKEN ?? "";
+const SERVICE_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN ?? "";
 
 function headers(extra: Record<string, string> = {}): Record<string, string> {
-  const base: Record<string, string> = { "Content-Type": "application/json", ...extra };
-  if (TOKEN) base.Authorization = `Bearer ${TOKEN}`;
+  const base = authHeaders(extra);
+  if (!getToken() && SERVICE_TOKEN) base.Authorization = `Bearer ${SERVICE_TOKEN}`;
   return base;
 }
 
@@ -24,8 +24,48 @@ async function readError(res: Response): Promise<string> {
   return detail;
 }
 
+/* ----------------------------- 认证 ----------------------------- */
+
+export interface AuthResult {
+  token: string;
+  expires_at: string;
+  user: SessionUser;
+}
+
+async function authCall(path: string, username: string, password: string): Promise<AuthResult> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as AuthResult;
+}
+
+export const login = (username: string, password: string) =>
+  authCall("/api/auth/login", username, password);
+
+export const register = (username: string, password: string) =>
+  authCall("/api/auth/register", username, password);
+
+export async function fetchMe(): Promise<SessionUser> {
+  const res = await fetch(`${API_BASE}/api/auth/me`, { headers: headers(), cache: "no-store" });
+  if (!res.ok) throw new Error(await readError(res));
+  const body = (await res.json()) as { user: SessionUser };
+  return body.user;
+}
+
+export async function logout(): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/api/auth/logout`, { method: "POST", headers: headers() });
+  } catch {
+    /* 忽略网络错误，本地清除即可 */
+  }
+}
+
+/* ----------------------------- 业务 ----------------------------- */
+
 export interface ApprovalPayload {
-  approver?: string;
   comment?: string;
 }
 
@@ -39,7 +79,6 @@ export async function postApproval(
     headers: headers(),
     body: JSON.stringify({
       decision,
-      approver: payload.approver?.trim() || undefined,
       comment: payload.comment?.trim() || undefined,
     }),
   });

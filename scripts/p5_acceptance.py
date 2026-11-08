@@ -29,11 +29,15 @@ def check(ok: bool, name: str, detail: str = "") -> bool:
     return ok
 
 
+TOKEN = ""
+
+
 def request(method: str, path: str, body: dict[str, Any] | None = None, timeout: float = 30) -> tuple[int, dict]:
     data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
-    req = urllib.request.Request(
-        f"{BASE}{path}", data=data, method=method, headers={"Content-Type": "application/json"}
-    )
+    headers = {"Content-Type": "application/json"}
+    if TOKEN:
+        headers["Authorization"] = f"Bearer {TOKEN}"
+    req = urllib.request.Request(f"{BASE}{path}", data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8") or "{}"
@@ -44,6 +48,19 @@ def request(method: str, path: str, body: dict[str, Any] | None = None, timeout:
             return exc.code, json.loads(raw)
         except json.JSONDecodeError:
             return exc.code, {"detail": raw}
+
+
+def bootstrap_user(username: str = "测试审批人", password: str = "test123456") -> bool:
+    """注册（或登录）一个验收用账号，后续请求都带它的会话 token。"""
+    global TOKEN
+    status, body = request("POST", "/api/auth/register", {"username": username, "password": password})
+    if status == 409:
+        status, body = request("POST", "/api/auth/login", {"username": username, "password": password})
+    if status != 200 or not body.get("token"):
+        print(f"  登录取 token 失败：{status} {body}")
+        return False
+    TOKEN = body["token"]
+    return True
 
 
 def make_event(tag: str) -> dict[str, Any]:
@@ -194,6 +211,10 @@ def main() -> int:
         check(body.get("checkpointer") == "sqlite", "断点持久化 = SQLite（重启可恢复）", str(body.get("checkpointer")))
     except Exception as exc:  # noqa: BLE001
         print(f"后端不可用：{exc}")
+        return 2
+
+    if not bootstrap_user():
+        print("无法登录，后续写操作会 401")
         return 2
 
     ok = test_rest_and_idempotency()

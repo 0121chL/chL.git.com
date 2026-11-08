@@ -80,6 +80,25 @@ CREATE TABLE IF NOT EXISTS telemetry (
 
 CREATE INDEX IF NOT EXISTS idx_telemetry_device ON telemetry(device_id, sensor, ts);
 CREATE INDEX IF NOT EXISTS idx_telemetry_ts ON telemetry(ts);
+
+-- 用户与会话（登录/注册）
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT    NOT NULL UNIQUE,
+    password_salt TEXT    NOT NULL,
+    password_hash TEXT    NOT NULL,
+    role          TEXT    NOT NULL DEFAULT 'operator',
+    created_at    TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT    PRIMARY KEY,
+    user_id    INTEGER NOT NULL,
+    created_at TEXT    NOT NULL,
+    expires_at TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 """
 
 
@@ -398,6 +417,74 @@ def list_telemetry(
 def count_telemetry(db_path: str | Path | None) -> int:
     with connect(db_path) as conn:
         return int(conn.execute("SELECT COUNT(*) FROM telemetry").fetchone()[0])
+
+
+# --------------------------------------------------------------------------- #
+# users / sessions
+# --------------------------------------------------------------------------- #
+def create_user(
+    db_path: str | Path | None,
+    username: str,
+    password_salt: str,
+    password_hash: str,
+    role: str = "operator",
+) -> dict[str, Any]:
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO users (username, password_salt, password_hash, role, created_at) VALUES (?,?,?,?,?)",
+            (username, password_salt, password_hash, role, utcnow()),
+        )
+        row = conn.execute(
+            "SELECT id, username, role, created_at FROM users WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+    return dict(row)
+
+
+def get_user(db_path: str | Path | None, username: str) -> dict[str, Any] | None:
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    return dict(row) if row else None
+
+
+def create_session(db_path: str | Path | None, token: str, user_id: int, ttl_days: int = 7) -> dict[str, Any]:
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(days=ttl_days)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+            (token, user_id, now.isoformat(timespec="seconds").replace("+00:00", "Z"), expires),
+        )
+    return {"token": token, "expires_at": expires}
+
+
+def get_session_user(db_path: str | Path | None, token: str) -> dict[str, Any] | None:
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT u.id, u.username, u.role, s.expires_at
+            FROM sessions s JOIN users u ON u.id = s.user_id
+            WHERE s.token = ?
+            """,
+            (token,),
+        ).fetchone()
+        if not row:
+            return None
+        if str(row["expires_at"]) < utcnow():
+            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            return None
+    return {"id": row["id"], "username": row["username"], "role": row["role"], "expires_at": row["expires_at"]}
+
+
+def delete_session(db_path: str | Path | None, token: str) -> None:
+    with connect(db_path) as conn:
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+
+
+def count_users(db_path: str | Path | None) -> int:
+    with connect(db_path) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
 
 
 def reset_all(db_path: str | Path | None) -> None:

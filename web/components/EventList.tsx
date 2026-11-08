@@ -1,6 +1,7 @@
 "use client";
 
 import type { EventRecord, RuleEvent } from "@/lib/types";
+import { ruleLabel } from "@/lib/labels";
 
 const SEVERITY: Record<string, { label: string; cls: string }> = {
   high: { label: "高危", cls: "border-rose-300 bg-rose-50 text-rose-700" },
@@ -75,17 +76,17 @@ export function EventCard({
       </div>
 
       <div className="mt-2 flex items-baseline justify-between gap-2">
-        <span className="truncate font-mono text-sm font-semibold">{event.rule_id ?? "—"}</span>
+        <span className="truncate text-sm font-semibold">{ruleLabel(event.rule_id)}</span>
         <span className="shrink-0 font-mono text-[11px] text-slate-500">{clock(event.triggered_at)}</span>
       </div>
       <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-500">
-        <span>{event.event_type ?? "—"}</span>
+        <span className="truncate">{event.rule_id ?? "—"}</span>
         {event.device_id ? (
           <span className="whitespace-nowrap rounded bg-slate-100 px-1 py-0.5 font-mono text-[10px] text-slate-600">
             {event.device_id}
           </span>
         ) : null}
-        <span className="truncate">· event_id {record.event_id}</span>
+        <span className="truncate">· {record.event_id}</span>
       </div>
 
       <div className="mt-2 rounded bg-slate-50 px-2 py-1.5 text-xs">

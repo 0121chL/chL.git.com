@@ -20,13 +20,34 @@ const existingId = process.argv.includes("--event-id")
   ? process.argv[process.argv.indexOf("--event-id") + 1]
   : null;
 
-function inject() {
+/** 给注入脚本换一个服务账号的 token（/api/dev/inject 需要登录） */
+async function serviceToken() {
+  const username = `svc${Date.now().toString().slice(-6)}`;
+  const body = JSON.stringify({ username, password: "test123456" });
+  let res = await fetch(`${BACKEND}/api/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  if (res.status === 409) {
+    res = await fetch(`${BACKEND}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+  }
+  if (!res.ok) throw new Error(`服务账号登录失败：${res.status}`);
+  return ((await res.json())).token;
+}
+
+function inject(token) {
   const res = spawnSync(
     "python",
     ["scripts/inject_event.py", "--scenario", scenario, "--http", "--direct"],
     {
       cwd: "F:\\deepseek\\wenjian\\safe-monitor-agent",
       encoding: "utf8",
+      env: { ...process.env, INJECT_TOKEN: token },
     },
   );
   const m = /"event_id":\s*"([^"]+)"/.exec(res.stdout ?? "");
@@ -38,7 +59,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 try {
   mkdirSync(SHOT_DIR, { recursive: true });
-  const eventId = existingId ?? inject();
+  const token = existingId ? null : await serviceToken();
+  const eventId = existingId ?? inject(token);
   console.log(`[browser] 事件 ${eventId}${existingId ? "（外部注入，不重复造事件）" : ""}`);
 
   const browser = await puppeteer.launch({
@@ -56,7 +78,30 @@ try {
     if (m.type() === "error") errors.push(m.text());
   });
 
+  await page.evaluateOnNewDocument(() => localStorage.clear());
   await page.goto(APP, { waitUntil: "networkidle2", timeout: 45000 });
+  await page.waitForFunction(
+    () => document.body.innerText.includes("规则事件") || document.body.innerText.includes("登录后才能查看事件"),
+    { timeout: 30000 },
+  );
+
+  // 0) 登录闸门：未登录应停在 /login，用注册流程进入看板
+  const username = `check${Date.now().toString().slice(-6)}`;
+  const onLogin = await page.evaluate(() => document.body.innerText.includes("登录后才能查看事件"));
+  if (onLogin) {
+    console.log("[browser] ✓ 未登录停留在 /login");
+    await page.click('[data-testid="tab-register"]');
+    await page.type('[data-testid="username"]', username);
+    await page.type('[data-testid="password"]', "test123456");
+    await page.type('[data-testid="confirm"]', "test123456");
+    await Promise.all([
+      page.click('[data-testid="submit"]'),
+      page.waitForFunction(() => location.pathname === "/", { timeout: 45000 }),
+    ]);
+    console.log("[browser] ✓ 注册并登录成功");
+  } else {
+    throw new Error("未登录却能直接进入看板：登录闸门失效");
+  }
 
   // 1) 事件卡
   await page.waitForFunction(
@@ -89,24 +134,15 @@ try {
 
   await page.screenshot({ path: `${SHOT_DIR}/p4-analysis.png` });
 
-  // 3) 填写审批人 / 意见，再点批准
+  // 3) 填写审批意见，再点批准（审批人取自登录用户）
   await page.evaluate(() => {
-    const setValue = (el, value) => {
-      if (!el) return;
-      const setter = Object.getOwnPropertyDescriptor(
-        Object.getPrototypeOf(el),
-        "value",
-      ).set;
-      setter.call(el, value);
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    };
-    setValue(document.querySelector('input[placeholder="姓名 / 工号"]'), "张工");
-    setValue(
-      document.querySelector('textarea[placeholder^="例如"]'),
-      "同意降载，30 分钟后复测 ch4",
-    );
+    const el = document.querySelector('textarea[placeholder^="例如"]');
+    if (!el) return;
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value").set;
+    setter.call(el, "同意降载，30 分钟后复测 ch4");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
   });
-  console.log("[browser] ✓ 填写审批人：张工");
+  console.log("[browser] ✓ 填写审批意见");
 
   const clicked = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll("button"));
@@ -118,14 +154,15 @@ try {
   if (!clicked) throw new Error("找不到可用的「批准」按钮");
   console.log("[browser] ✓ 点击批准");
 
-  // 4) 工单表出现该事件，并且记录了审批人
+  // 4) 工单表出现该事件，并且记录了登录用户作为审批人
   await page.waitForFunction(
-    (id) => {
+    (id, name) => {
       const table = document.querySelector("table");
-      return Boolean(table && table.innerText.includes(id) && table.innerText.includes("张工"));
+      return Boolean(table && table.innerText.includes(id) && table.innerText.includes(name));
     },
     { timeout: 30000 },
     eventId,
+    username,
   );
   console.log("[browser] ✓ 工单出现在底部列表，审批人已落库");
 

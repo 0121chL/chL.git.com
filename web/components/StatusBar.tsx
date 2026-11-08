@@ -42,10 +42,14 @@ export function StatusBar({
   status,
   sseConnected,
   lastError,
+  username,
+  onSignOut,
 }: {
   status: StatusPayload | null;
   sseConnected: boolean;
   lastError: string | null;
+  username: string;
+  onSignOut: () => void;
 }) {
   const mqtt = status?.mqtt;
   const analyzer = ANALYZER_LABEL[status?.analyzer ?? "offline-template"] ?? {
@@ -101,6 +105,19 @@ export function StatusBar({
             <div className="font-mono text-base font-semibold text-emerald-700">
               {status?.counts.work_orders ?? 0}
             </div>
+          </div>
+          <div className="flex items-center gap-2 border-l border-slate-200 pl-4">
+            <span className="text-xs text-slate-600" data-testid="current-user">
+              {username}
+            </span>
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="rounded border border-slate-300 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+              data-testid="signout"
+            >
+              退出
+            </button>
           </div>
         </div>
       </div>

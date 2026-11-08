@@ -63,12 +63,30 @@ class SSEReader(threading.Thread):
         return None
 
 
-def post(path: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+TOKEN = ""
+
+
+def post(path: str, body: dict[str, Any], auth: bool = True) -> tuple[int, dict[str, Any]]:
     conn = http.client.HTTPConnection(API_HOST, API_PORT, timeout=30)
-    conn.request("POST", path, json.dumps(body).encode("utf-8"), {"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if auth and TOKEN:
+        headers["Authorization"] = f"Bearer {TOKEN}"
+    conn.request("POST", path, json.dumps(body).encode("utf-8"), headers)
     resp = conn.getresponse()
     data = json.loads(resp.read().decode("utf-8") or "{}")
     return resp.status, data
+
+
+def bootstrap_user(username: str = "验收脚本", password: str = "test123456") -> None:
+    """注册或登录，把 token 放进 TOKEN。"""
+    global TOKEN
+    status, body = post("/api/auth/register", {"username": username, "password": password}, auth=False)
+    if status == 409:
+        status, body = post("/api/auth/login", {"username": username, "password": password}, auth=False)
+    if status == 200:
+        TOKEN = body.get("token", "")
+    else:
+        print(f"  ! 登录失败：{status} {body}")
 
 
 def main() -> int:
@@ -79,6 +97,8 @@ def main() -> int:
 
     sys.path.insert(0, "scripts")
     import inject_event  # noqa: E402
+
+    bootstrap_user()
 
     event = inject_event.build_event(args.scenario)
     event_id = event["event_id"]

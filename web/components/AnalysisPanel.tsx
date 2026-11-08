@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { TelemetryChart } from "@/components/TelemetryChart";
+import { ruleLabel } from "@/lib/labels";
 import type { EventRecord, RiskLevel } from "@/lib/types";
 
 const RISK: Record<RiskLevel, { label: string; cls: string }> = {
@@ -23,15 +24,16 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 export function AnalysisPanel({
   record,
   busy,
+  approver,
   onDecide,
   onRetry,
 }: {
   record: EventRecord | null;
   busy: boolean;
-  onDecide: (decision: "approve" | "reject", approver: string, comment: string) => void;
+  approver: string;
+  onDecide: (decision: "approve" | "reject", comment: string) => void;
   onRetry: () => void;
 }) {
-  const [approver, setApprover] = useState("值班调度员");
   const [comment, setComment] = useState("");
 
   if (!record) {
@@ -54,8 +56,8 @@ export function AnalysisPanel({
       <header className="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-3">
         <div className="min-w-0">
           <h2 className="text-sm font-semibold">Agent 分析</h2>
-          <p className="mt-0.5 truncate font-mono text-[11px] text-slate-500">
-            {record.event.rule_id ?? "—"} · {record.event.device_id ?? "未标注设备"} · {record.event_id}
+          <p className="mt-0.5 truncate text-[11px] text-slate-500">
+            {ruleLabel(record.event.rule_id)} · {record.event.device_id ?? "未标注设备"} · {record.event_id}
           </p>
         </div>
         {risk ? (
@@ -117,17 +119,12 @@ export function AnalysisPanel({
 
       <footer className="border-t border-slate-200 bg-slate-50 px-4 py-3">
         <div className="grid gap-2 sm:grid-cols-[170px_1fr]">
-          <label className="text-[11px] text-slate-500">
-            审批人
-            <input
-              value={approver}
-              onChange={(e) => setApprover(e.target.value)}
-              disabled={!pending || busy}
-              maxLength={60}
-              className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-800 disabled:bg-slate-100"
-              placeholder="姓名 / 工号"
-            />
-          </label>
+          <div className="text-[11px] text-slate-500">
+            审批人（当前登录用户）
+            <div className="mt-1 w-full rounded border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800">
+              {approver}
+            </div>
+          </div>
           <label className="text-[11px] text-slate-500">
             审批意见（可选，与决定一并落库）
             <textarea
@@ -156,7 +153,7 @@ export function AnalysisPanel({
           <button
             type="button"
             disabled={!pending || busy}
-            onClick={() => onDecide("approve", approver, comment)}
+            onClick={() => onDecide("approve", comment)}
             className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300"
           >
             批准
@@ -164,7 +161,7 @@ export function AnalysisPanel({
           <button
             type="button"
             disabled={!pending || busy}
-            onClick={() => onDecide("reject", approver, comment)}
+            onClick={() => onDecide("reject", comment)}
             className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-400"
           >
             拒绝

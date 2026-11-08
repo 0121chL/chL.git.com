@@ -1,8 +1,13 @@
 "use client";
 
+import { ruleLabel } from "@/lib/labels";
 import type { WorkOrder } from "@/lib/types";
 
 const RISK_LABEL: Record<string, string> = { high: "高", medium: "中", low: "低" };
+
+function ruleOf(order: WorkOrder): string | undefined {
+  return order.content?.rule_id as string | undefined;
+}
 
 function summary(order: WorkOrder): string {
   const analysis = (order.content?.analysis ?? {}) as Record<string, string>;
@@ -53,7 +58,10 @@ export function WorkOrderTable({ orders }: { orders: WorkOrder[] }) {
               orders.map((order) => (
                 <tr key={order.id} className="border-t border-slate-100">
                   <td className="px-4 py-2 font-mono font-semibold">WO-{String(order.id).padStart(4, "0")}</td>
-                  <td className="px-4 py-2 font-mono text-slate-600">{order.event_id}</td>
+                  <td className="px-4 py-2">
+                    <div className="text-slate-700">{ruleLabel(ruleOf(order))}</div>
+                    <div className="font-mono text-[10px] text-slate-400">{order.event_id}</div>
+                  </td>
                   <td className="px-4 py-2">{riskOf(order)}</td>
                   <td className="px-4 py-2 text-slate-700" title={order.approval_comment ?? "无审批意见"}>
                     {order.approver ?? "—"}
