@@ -28,8 +28,12 @@ export default function LoginPage() {
       return;
     }
     if (mode === "register") {
-      if (password.length < 6) {
-        setError("密码至少 6 位");
+      if (password.length < 8) {
+        setError("密码至少 8 位");
+        return;
+      }
+      if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+        setError("密码需同时包含字母和数字");
         return;
       }
       if (password !== confirm) {
@@ -100,7 +104,7 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete={mode === "login" ? "current-password" : "new-password"}
-              placeholder={mode === "register" ? "至少 6 位" : ""}
+              placeholder={mode === "register" ? "至少 8 位，含字母和数字" : ""}
               className="mt-1 w-full rounded border border-slate-300 px-2 py-2 text-sm text-slate-900 outline-none focus:border-slate-500"
               data-testid="password"
             />

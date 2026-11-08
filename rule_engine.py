@@ -283,10 +283,14 @@ def main() -> int:
                 removed = db.purge_telemetry(db.DEFAULT_DB_PATH, retention)
                 if removed:
                     print(f"[rule] 清理过期遥测 {removed} 行", flush=True)
+                aged = db.purge_audit(db.DEFAULT_DB_PATH, retention_days=30)
+                if aged:
+                    print(f"[rule] 清理 30 天前审计/事件 {aged} 行", flush=True)
             except Exception as exc:  # noqa: BLE001
                 print(f"[rule] 遥测清理失败：{exc}", flush=True)
 
     db.purge_telemetry(db.DEFAULT_DB_PATH, retention)
+    db.purge_audit(db.DEFAULT_DB_PATH, retention_days=30)
     threading.Thread(target=housekeeping, name="telemetry-housekeeping", daemon=True).start()
 
     client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id="rule-engine")

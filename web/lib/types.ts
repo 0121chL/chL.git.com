@@ -1,6 +1,12 @@
 export type Severity = "high" | "medium" | "low";
 export type RiskLevel = "high" | "medium" | "low";
-export type EventStatus = "pending" | "approved" | "rejected" | "analysis_failed" | "graph_failed";
+export type EventStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "superseded"
+  | "analysis_failed"
+  | "graph_failed";
 
 export interface SensorSnapshot {
   value?: number;
@@ -54,6 +60,10 @@ export interface WorkOrder {
   approver?: string | null;
   approval_comment?: string | null;
   decided_at?: string | null;
+  assignee?: string | null;
+  assigned_at?: string | null;
+  closed_at?: string | null;
+  resolution?: string | null;
 }
 
 export interface TelemetryPoint {

@@ -11,10 +11,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,11 @@ CREATE TABLE IF NOT EXISTS work_orders (
     event_id   TEXT    NOT NULL UNIQUE,
     content    TEXT    NOT NULL,
     status     TEXT    NOT NULL DEFAULT 'created',
-    created_at TEXT    NOT NULL
+    created_at TEXT    NOT NULL,
+    assignee   TEXT,
+    assigned_at TEXT,
+    closed_at  TEXT,
+    resolution TEXT
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -91,20 +96,43 @@ CREATE TABLE IF NOT EXISTS users (
     created_at    TEXT    NOT NULL
 );
 
+-- 只存令牌的 SHA-256 摘要，不落明文
 CREATE TABLE IF NOT EXISTS sessions (
-    token      TEXT    PRIMARY KEY,
-    user_id    INTEGER NOT NULL,
-    created_at TEXT    NOT NULL,
-    expires_at TEXT    NOT NULL
+    token_hash   TEXT    PRIMARY KEY,
+    user_id      INTEGER NOT NULL,
+    created_at   TEXT    NOT NULL,
+    expires_at   TEXT    NOT NULL,
+    last_used_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- 登录失败计数（限流/锁定）
+CREATE TABLE IF NOT EXISTS login_attempts (
+    username     TEXT    PRIMARY KEY,
+    failed       INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
+    last_at      TEXT    NOT NULL
+);
 """
 
 
 def utcnow() -> str:
     """统一的时间戳格式：2026-11-05T14:03:21Z（UTC，秒级）。"""
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def to_utc_iso(value: str | None) -> str | None:
+    """把带偏移的时间（如 2026-11-08T12:21:17+08:00）统一成 UTC 的 ...Z 形式。"""
+    if not value:
+        return value
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    except ValueError:
+        return value
 
 
 def resolve_db_path(db_path: str | Path | None = None) -> Path:
@@ -131,7 +159,54 @@ def init_db(db_path: str | Path | None = None) -> Path:
     path = resolve_db_path(db_path)
     with connect(path) as conn:
         conn.executescript(DDL)
+        _migrate(conn)
     return path
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """就地升级旧库：会话令牌改存摘要、工单补流转字段。
+
+    迁移是幂等的：字段/表已经对得上就直接返回。
+    """
+    # 1) sessions: token(明文) → token_hash(摘要)
+    cols = _columns(conn, "sessions")
+    if "token" in cols and "token_hash" not in cols:
+        import hashlib
+
+        conn.execute("ALTER TABLE sessions RENAME TO sessions_legacy")
+        conn.execute(
+            """
+            CREATE TABLE sessions (
+                token_hash   TEXT    PRIMARY KEY,
+                user_id      INTEGER NOT NULL,
+                created_at   TEXT    NOT NULL,
+                expires_at   TEXT    NOT NULL,
+                last_used_at TEXT
+            )
+            """
+        )
+        for row in conn.execute("SELECT token, user_id, created_at, expires_at FROM sessions_legacy"):
+            digest = hashlib.sha256(str(row["token"]).encode("utf-8")).hexdigest()
+            conn.execute(
+                "INSERT OR IGNORE INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+                (digest, row["user_id"], row["created_at"], row["expires_at"]),
+            )
+        conn.execute("DROP TABLE sessions_legacy")
+
+    # 2) work_orders: 补流转字段
+    wo_cols = _columns(conn, "work_orders")
+    for column, ddl in (
+        ("assignee", "ALTER TABLE work_orders ADD COLUMN assignee TEXT"),
+        ("assigned_at", "ALTER TABLE work_orders ADD COLUMN assigned_at TEXT"),
+        ("closed_at", "ALTER TABLE work_orders ADD COLUMN closed_at TEXT"),
+        ("resolution", "ALTER TABLE work_orders ADD COLUMN resolution TEXT"),
+    ):
+        if column not in wo_cols:
+            conn.execute(ddl)
 
 
 # --------------------------------------------------------------------------- #
@@ -167,6 +242,33 @@ def get_work_order(db_path: str | Path | None, event_id: str) -> dict[str, Any] 
             (event_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+def get_work_order_by_id(db_path: str | Path | None, work_order_id: int) -> dict[str, Any] | None:
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT id, event_id, content, status, created_at, assignee, assigned_at, closed_at, resolution
+            FROM work_orders WHERE id = ?
+            """,
+            (work_order_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_work_order(db_path: str | Path | None, work_order_id: int, **fields: Any) -> dict[str, Any] | None:
+    """只允许更新流转相关字段；其它键会被忽略。"""
+    allowed = {"status", "assignee", "assigned_at", "closed_at", "resolution"}
+    payload = {k: v for k, v in fields.items() if k in allowed}
+    if not payload:
+        return get_work_order_by_id(db_path, work_order_id)
+    assignments = ", ".join(f"{key} = ?" for key in payload)
+    with connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE work_orders SET {assignments} WHERE id = ?",
+            (*payload.values(), work_order_id),
+        )
+    return get_work_order_by_id(db_path, work_order_id)
 
 
 def count_work_orders(db_path: str | Path | None, event_id: str | None = None) -> int:
@@ -315,6 +417,7 @@ def list_work_orders(db_path: str | Path | None, limit: int = 50) -> list[dict[s
         rows = conn.execute(
             """
             SELECT w.id, w.event_id, w.content, w.status, w.created_at,
+                   w.assignee, w.assigned_at, w.closed_at, w.resolution,
                    a.approver, a.comment AS approval_comment, a.decided_at
             FROM work_orders w
             LEFT JOIN approvals a ON a.event_id = w.event_id
@@ -379,7 +482,7 @@ def insert_telemetry(
     with connect(db_path) as conn:
         conn.execute(
             "INSERT INTO telemetry (ts, device_id, sensor, value, unit, scenario_id) VALUES (?,?,?,?,?,?)",
-            (ts, device_id, sensor, value, unit, scenario_id),
+            (to_utc_iso(ts), device_id, sensor, value, unit, scenario_id),
         )
 
 
@@ -387,10 +490,24 @@ def purge_telemetry(db_path: str | Path | None, retention_hours: float) -> int:
     """删除 retention 之前的遥测，返回删除行数。"""
     with connect(db_path) as conn:
         cur = conn.execute(
-            "DELETE FROM telemetry WHERE ts < datetime('now', ?)",
+            "DELETE FROM telemetry WHERE julianday(ts) < julianday('now', ?)",
             (f"-{retention_hours} hours",),
         )
         return cur.rowcount
+
+
+def purge_audit(db_path: str | Path | None, retention_days: float = 30) -> int:
+    """审计与事件只保留最近 N 天，避免 SQLite 无限膨胀。"""
+    with connect(db_path) as conn:
+        removed = conn.execute(
+            "DELETE FROM audit_log WHERE julianday(created_at) < julianday('now', ?)",
+            (f"-{retention_days} days",),
+        ).rowcount
+        removed += conn.execute(
+            "DELETE FROM events WHERE julianday(received_at) < julianday('now', ?)",
+            (f"-{retention_days} days",),
+        ).rowcount
+        return removed
 
 
 def list_telemetry(
@@ -400,7 +517,8 @@ def list_telemetry(
     minutes: int = 60,
     limit: int = 2000,
 ) -> list[dict[str, Any]]:
-    sql = "SELECT ts, device_id, sensor, value, unit FROM telemetry WHERE ts >= datetime('now', ?)"
+    # julianday 能解析带 T 与 +08:00 的 ISO 时间，避免字符串比较把整天都算进来
+    sql = "SELECT ts, device_id, sensor, value, unit FROM telemetry WHERE julianday(ts) >= julianday('now', ?)"
     params: list[Any] = [f"-{int(minutes)} minutes"]
     if device_id:
         sql += " AND device_id = ?"
@@ -447,39 +565,102 @@ def get_user(db_path: str | Path | None, username: str) -> dict[str, Any] | None
 
 
 def create_session(db_path: str | Path | None, token: str, user_id: int, ttl_days: int = 7) -> dict[str, Any]:
+    """只落库令牌摘要；原始令牌只返回给调用方一次。"""
     from datetime import timedelta
 
     now = datetime.now(timezone.utc)
     expires = (now + timedelta(days=ttl_days)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     with connect(db_path) as conn:
         conn.execute(
-            "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)",
-            (token, user_id, now.isoformat(timespec="seconds").replace("+00:00", "Z"), expires),
+            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at, last_used_at) VALUES (?,?,?,?,?)",
+            (digest, user_id, now.isoformat(timespec="seconds").replace("+00:00", "Z"), expires, None),
         )
-    return {"token": token, "expires_at": expires}
+    return {"expires_at": expires}
 
 
 def get_session_user(db_path: str | Path | None, token: str) -> dict[str, Any] | None:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     with connect(db_path) as conn:
         row = conn.execute(
             """
             SELECT u.id, u.username, u.role, s.expires_at
             FROM sessions s JOIN users u ON u.id = s.user_id
-            WHERE s.token = ?
+            WHERE s.token_hash = ?
             """,
-            (token,),
+            (digest,),
         ).fetchone()
         if not row:
             return None
         if str(row["expires_at"]) < utcnow():
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            conn.execute("DELETE FROM sessions WHERE token_hash = ?", (digest,))
             return None
+        conn.execute("UPDATE sessions SET last_used_at = ? WHERE token_hash = ?", (utcnow(), digest))
     return {"id": row["id"], "username": row["username"], "role": row["role"], "expires_at": row["expires_at"]}
 
 
 def delete_session(db_path: str | Path | None, token: str) -> None:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     with connect(db_path) as conn:
-        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.execute("DELETE FROM sessions WHERE token_hash = ?", (digest,))
+
+
+def delete_user_sessions(db_path: str | Path | None, user_id: int) -> int:
+    with connect(db_path) as conn:
+        return conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,)).rowcount
+
+
+def list_sessions(db_path: str | Path | None, user_id: int) -> list[dict[str, Any]]:
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT created_at, expires_at, last_used_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# 登录限流（防爆破）
+# --------------------------------------------------------------------------- #
+def get_login_state(db_path: str | Path | None, username: str) -> dict[str, Any] | None:
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT username, failed, locked_until, last_at FROM login_attempts WHERE username = ?",
+            (username,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def record_login_failure(
+    db_path: str | Path | None,
+    username: str,
+    threshold: int = 5,
+    lock_seconds: int = 60,
+) -> dict[str, Any]:
+    """失败次数 +1；达到阈值则锁定一段时间（逐次翻倍，最多 15 分钟）。"""
+    state = get_login_state(db_path, username) or {"failed": 0}
+    failed = int(state.get("failed") or 0) + 1
+    locked_until = None
+    if failed >= threshold:
+        rounds = min(failed - threshold + 1, 5)
+        locked_until = (
+            datetime.now(timezone.utc) + timedelta(seconds=lock_seconds * (2 ** (rounds - 1)))
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO login_attempts (username, failed, locked_until, last_at) VALUES (?,?,?,?)
+            ON CONFLICT(username) DO UPDATE SET failed=excluded.failed,
+                locked_until=excluded.locked_until, last_at=excluded.last_at
+            """,
+            (username, failed, locked_until, utcnow()),
+        )
+    return {"failed": failed, "locked_until": locked_until}
+
+
+def clear_login_failures(db_path: str | Path | None, username: str) -> None:
+    with connect(db_path) as conn:
+        conn.execute("DELETE FROM login_attempts WHERE username = ?", (username,))
 
 
 def count_users(db_path: str | Path | None) -> int:

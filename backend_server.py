@@ -573,6 +573,13 @@ def _decide(
         # 真正要落审批记录时才要求审批人：重复调用/状态冲突优先返回 409
         who = _normalize_approver(approver)
 
+        # 四眼原则：手工注入该事件的人不能自己批准
+        if decision == "approve":
+            record = EVENTS.get(event_id) or {}
+            origin_user = (record.get("event") or {}).get("origin_user")
+            if origin_user and origin_user == who:
+                raise HTTPException(status_code=403, detail="不能审批自己注入的事件，请换一个账号")
+
         result = graph.invoke(Command(resume=decision), config)
         status = "approved" if decision == "approve" else "rejected"
         db.set_event_status(DB_PATH, event_id, status)
@@ -695,7 +702,7 @@ async def lifespan(_: FastAPI):
     mqtt.stop()
 
 
-def _ingest(event: dict[str, Any], source: str = "http") -> dict[str, Any]:
+def _ingest(event: dict[str, Any], source: str = "http", origin_user: str | None = None) -> dict[str, Any]:
     if not isinstance(event, dict):
         raise HTTPException(status_code=422, detail="事件必须是 JSON 对象")
     event_id = str(event.get("event_id") or f"evt-{uuid.uuid4().hex[:12]}")
@@ -710,6 +717,8 @@ def _ingest(event: dict[str, Any], source: str = "http") -> dict[str, Any]:
         "dev": "manual",
     }.get(source, source)
     event["origin"] = origin
+    if origin_user:
+        event["origin_user"] = origin_user
     if origin == "manual":
         inc("manual_injected_total")
 
@@ -725,9 +734,28 @@ def _ingest(event: dict[str, Any], source: str = "http") -> dict[str, Any]:
             "origin": origin,
             "received_at": utcnow(),
         }
+        _trim_events_locked()
 
     threading.Thread(target=process_event, args=(event,), daemon=True).start()
     return {"accepted": True, "duplicate": False, "event_id": event_id, "thread_id": event_id}
+
+
+MAX_MEMORY_EVENTS = int(os.environ.get("MAX_MEMORY_EVENTS", "800"))
+
+
+def _trim_events_locked() -> None:
+    """EVENTS 只保留最近 N 条（终止态优先淘汰），避免长跑内存无限增长。"""
+    if len(EVENTS) <= MAX_MEMORY_EVENTS:
+        return
+    terminal = {"approved", "rejected", "analysis_failed", "graph_failed"}
+    removable = [
+        (record.get("received_at") or "", event_id)
+        for event_id, record in EVENTS.items()
+        if record.get("status") in terminal
+    ]
+    removable.sort()
+    for _, event_id in removable[: len(EVENTS) - MAX_MEMORY_EVENTS]:
+        EVENTS.pop(event_id, None)
 
 
 app = FastAPI(title="安全监测 Agent Demo", version="5.0", lifespan=lifespan)
@@ -761,8 +789,9 @@ def register(body: AuthBody) -> dict[str, Any]:
     username = body.username.strip()
     if not USERNAME_RE.match(username):
         raise HTTPException(status_code=422, detail="用户名 3–32 位，仅限字母/数字/下划线/汉字/点/横线")
-    if len(body.password) < 6:
-        raise HTTPException(status_code=422, detail="密码至少 6 位")
+    bad_password = auth.validate_password(body.password)
+    if bad_password:
+        raise HTTPException(status_code=422, detail=bad_password)
     if db.get_user(DB_PATH, username):
         raise HTTPException(status_code=409, detail="用户名已存在，请直接登录")
 
@@ -774,9 +803,23 @@ def register(body: AuthBody) -> dict[str, Any]:
 
 @app.post("/api/auth/login")
 def login(body: AuthBody) -> dict[str, Any]:
-    user = db.get_user(DB_PATH, body.username.strip())
+    username = body.username.strip()
+    # 限流：连续失败 5 次锁 60s，之后每次翻倍，最多 15 分钟
+    state = db.get_login_state(DB_PATH, username)
+    if state and state.get("locked_until") and str(state["locked_until"]) > utcnow():
+        raise HTTPException(
+            status_code=429,
+            detail=f"失败次数过多，账号已临时锁定至 {state['locked_until']}（UTC），请稍后再试",
+        )
+
+    user = db.get_user(DB_PATH, username)
     if not user or not auth.verify_password(body.password, user["password_salt"], user["password_hash"]):
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
+        info = db.record_login_failure(DB_PATH, username)
+        inc("login_failed_total")
+        suffix = f"，已失败 {info['failed']} 次" if info["failed"] < 5 else "，账号已临时锁定"
+        raise HTTPException(status_code=401, detail=f"用户名或密码错误{suffix}")
+
+    db.clear_login_failures(DB_PATH, username)
     inc("users_login_total")
     return _issue_token({"id": user["id"], "username": user["username"], "role": user["role"]})
 
@@ -786,12 +829,26 @@ def me(user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     return {"user": user}
 
 
+@app.get("/api/auth/sessions")
+def my_sessions(user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    if not user.get("id"):
+        return {"sessions": []}
+    return {"sessions": db.list_sessions(DB_PATH, int(user["id"]))}
+
+
 @app.post("/api/auth/logout")
 def logout(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     token = _bearer(authorization)
     if token and token != API_TOKEN:
         db.delete_session(DB_PATH, token)
     return {"ok": True}
+
+
+@app.post("/api/auth/logout-all")
+def logout_all(user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    """吊销该用户全部会话（换机器/怀疑泄露时用）。"""
+    removed = db.delete_user_sessions(DB_PATH, int(user["id"])) if user.get("id") else 0
+    return {"ok": True, "revoked": removed}
 
 
 # --------------------------------------------------------------------------- #
@@ -977,9 +1034,131 @@ def api_approval(
     raise HTTPException(status_code=422, detail=f"非法 decision: {decision!r}")
 
 
-@app.post("/api/dev/inject", dependencies=[Depends(require_auth)])
-def api_inject(event: dict[str, Any]) -> dict[str, Any]:
-    return _ingest(event, source="dev")
+@app.post("/api/dev/inject")
+def api_inject(event: dict[str, Any], user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    return _ingest(event, source="dev", origin_user=user["username"])
+
+
+# --------------------------------------------------------------------------- #
+# 工单流转：created → assigned → closed（可重新打开）
+# --------------------------------------------------------------------------- #
+class AssignBody(BaseModel):
+    assignee: str
+
+
+class CloseBody(BaseModel):
+    resolution: str
+
+
+def _work_order_or_404(order_id: int) -> dict[str, Any]:
+    row = db.get_work_order_by_id(DB_PATH, order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"工单 {order_id} 不存在")
+    return row
+
+
+def _push_work_order(row: dict[str, Any]) -> dict[str, Any]:
+    payload = _work_order_payload(row)
+    broadcast(
+        {
+            "type": "work_order",
+            "event_id": row["event_id"],
+            "work_order": payload,
+            "counts": counts(),
+        }
+    )
+    return {"ok": True, "work_order": payload}
+
+
+@app.post("/api/work_orders/{order_id}/assign")
+def assign_work_order(
+    order_id: int,
+    body: AssignBody,
+    user: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    row = _work_order_or_404(order_id)
+    if row["status"] == "closed":
+        raise HTTPException(status_code=409, detail="工单已关闭，先重新打开再指派")
+    assignee = body.assignee.strip()[:60]
+    if len(assignee) < 1:
+        raise HTTPException(status_code=422, detail="请填写处理人")
+    updated = db.update_work_order(
+        DB_PATH, order_id, status="assigned", assignee=assignee, assigned_at=utcnow()
+    )
+    db.upsert_audit(
+        DB_PATH,
+        f"work_order:{order_id}",
+        "assigned",
+        json.dumps({"assignee": assignee, "by": user["username"]}, ensure_ascii=False),
+    )
+    return _push_work_order(updated)
+
+
+@app.post("/api/work_orders/{order_id}/close")
+def close_work_order(
+    order_id: int,
+    body: CloseBody,
+    user: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    row = _work_order_or_404(order_id)
+    if row["status"] == "closed":
+        raise HTTPException(status_code=409, detail="工单已经关闭")
+    resolution = body.resolution.strip()[:500]
+    if len(resolution) < 2:
+        raise HTTPException(status_code=422, detail="请填写处置结果（至少 2 个字）")
+    updated = db.update_work_order(
+        DB_PATH, order_id, status="closed", closed_at=utcnow(), resolution=resolution
+    )
+    db.upsert_audit(
+        DB_PATH,
+        f"work_order:{order_id}",
+        "closed",
+        json.dumps({"resolution": resolution, "by": user["username"]}, ensure_ascii=False),
+    )
+    return _push_work_order(updated)
+
+
+@app.post("/api/work_orders/{order_id}/reopen")
+def reopen_work_order(order_id: int, user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    row = _work_order_or_404(order_id)
+    if row["status"] != "closed":
+        raise HTTPException(status_code=409, detail="只有已关闭的工单可以重新打开")
+    updated = db.update_work_order(
+        DB_PATH, order_id, status="created", closed_at=None, resolution=None
+    )
+    db.upsert_audit(
+        DB_PATH,
+        f"work_order:{order_id}",
+        "reopened",
+        json.dumps({"by": user["username"]}, ensure_ascii=False),
+    )
+    return _push_work_order(updated)
+
+
+# --------------------------------------------------------------------------- #
+# 驳回后重新提交（生成新事件，保留 retry_of 追溯）
+# --------------------------------------------------------------------------- #
+@app.post("/api/events/{event_id}/resubmit")
+def resubmit_event(event_id: str, user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    record = EVENTS.get(event_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="未知 event_id（后端重启后内存已清空）")
+    if record.get("status") != "rejected":
+        raise HTTPException(status_code=409, detail=f"只有已拒绝的事件可以重新提交，当前 {record.get('status')}")
+
+    parent = dict(record.get("event") or {})
+    new_event = {
+        **parent,
+        "event_id": f"evt-resubmit-{uuid.uuid4().hex[:8]}",
+        "retry_of": event_id,
+        "triggered_at": utcnow(),
+        "origin_user": user["username"],
+    }
+    db.set_event_status(DB_PATH, event_id, "superseded")
+    _mark(event_id, status="superseded")
+    result = _ingest(new_event, source="http", origin_user=user["username"])
+    inc("events_resubmitted_total")
+    return {**result, "retry_of": event_id}
 
 
 if __name__ == "__main__":

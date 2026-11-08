@@ -77,19 +77,19 @@ def post(path: str, body: dict[str, Any], auth: bool = True) -> tuple[int, dict[
     return resp.status, data
 
 
-def bootstrap_user(username: str = "验收脚本", password: str = "test123456") -> None:
-    """注册或登录，把 token 放进 TOKEN。"""
-    global TOKEN
+def bootstrap_user(username: str = "验收脚本", password: str = "test123456") -> str:
+    """注册或登录，返回 token（不修改全局 TOKEN）。"""
     status, body = post("/api/auth/register", {"username": username, "password": password}, auth=False)
     if status == 409:
         status, body = post("/api/auth/login", {"username": username, "password": password}, auth=False)
     if status == 200:
-        TOKEN = body.get("token", "")
-    else:
-        print(f"  ! 登录失败：{status} {body}")
+        return body.get("token", "")
+    print(f"  ! 登录失败：{status} {body}")
+    return ""
 
 
 def main() -> int:
+    global TOKEN
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default="gas_surge")
     ap.add_argument("--timeout", type=float, default=180.0)
@@ -98,7 +98,11 @@ def main() -> int:
     sys.path.insert(0, "scripts")
     import inject_event  # noqa: E402
 
-    bootstrap_user()
+    TOKEN = bootstrap_user("验收脚本")
+    approver_token = bootstrap_user("验收审批")
+    if not TOKEN or not approver_token:
+        print("  ✗ 验收账号登录失败")
+        return 1
 
     event = inject_event.build_event(args.scenario)
     event_id = event["event_id"]
@@ -137,14 +141,15 @@ def main() -> int:
         return 1
     print("  ✓ 0 张")
 
-    print("[5/6] POST 批准")
+    print("[5/6] POST 批准（换审批人账号，验证四眼原则）")
+    TOKEN = approver_token
     status, body = post(
-        f"/api/approvals/{event_id}", {"decision": "approve", "approver": "验收脚本"}
+        f"/api/approvals/{event_id}", {"decision": "approve", "comment": "验收：同意"}
     )
     if status != 200:
         print(f"  ✗ 批准失败 {status} {body}")
         return 1
-    print(f"  ✓ {body.get('decision')}")
+    print(f"  ✓ {body.get('decision')}；审批人 {body.get('approver')}")
 
     print("[6/6] 等待 work_order 推送并校验 SQLite")
     order_msg = reader.wait_for(

@@ -27,12 +27,14 @@ export function AnalysisPanel({
   approver,
   onDecide,
   onRetry,
+  onResubmit,
 }: {
   record: EventRecord | null;
   busy: boolean;
   approver: string;
   onDecide: (decision: "approve" | "reject", comment: string) => void;
   onRetry: () => void;
+  onResubmit: () => void;
 }) {
   const [comment, setComment] = useState("");
 
@@ -148,6 +150,16 @@ export function AnalysisPanel({
               className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-sm font-medium text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:text-slate-400"
             >
               重试分析
+            </button>
+          ) : null}
+          {record.status === "rejected" ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onResubmit}
+              className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-400"
+            >
+              重新提交复核
             </button>
           ) : null}
           <button

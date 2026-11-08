@@ -13,6 +13,7 @@ const STATUS: Record<string, { label: string; cls: string }> = {
   pending: { label: "待审批", cls: "border-amber-300 bg-amber-50 text-amber-800" },
   approved: { label: "已批准", cls: "border-emerald-300 bg-emerald-50 text-emerald-700" },
   rejected: { label: "已拒绝", cls: "border-slate-300 bg-slate-100 text-slate-600" },
+  superseded: { label: "已重提", cls: "border-slate-300 bg-slate-50 text-slate-500" },
   analysis_failed: { label: "分析失败", cls: "border-rose-300 bg-rose-50 text-rose-700" },
   graph_failed: { label: "执行失败", cls: "border-rose-300 bg-rose-50 text-rose-700" },
 };

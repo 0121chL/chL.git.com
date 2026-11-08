@@ -6,8 +6,18 @@ import { useRouter } from "next/navigation";
 import { AnalysisPanel } from "@/components/AnalysisPanel";
 import { EventList } from "@/components/EventList";
 import { StatusBar } from "@/components/StatusBar";
-import { WorkOrderTable } from "@/components/WorkOrderTable";
-import { API_BASE, fetchMe, logout, postApproval, retryAnalysis } from "@/lib/api";
+import { WorkOrderTable, type WorkOrderAction } from "@/components/WorkOrderTable";
+import {
+  API_BASE,
+  assignWorkOrder,
+  closeWorkOrder,
+  fetchMe,
+  logout,
+  postApproval,
+  reopenWorkOrder,
+  resubmitEvent,
+  retryAnalysis,
+} from "@/lib/api";
 import { clearSession, getToken, type SessionUser } from "@/lib/auth";
 import type { EventRecord, StatusPayload, StreamMessage, WorkOrder } from "@/lib/types";
 
@@ -191,6 +201,39 @@ export default function DashboardPage() {
     [selected],
   );
 
+  const [woBusy, setWoBusy] = useState<number | null>(null);
+
+  const woAction = useCallback(
+    async (action: WorkOrderAction, order: WorkOrder, value?: string) => {
+      setWoBusy(order.id);
+      setError(null);
+      try {
+        if (action === "assign") await assignWorkOrder(order.id, value ?? "");
+        else if (action === "close") await closeWorkOrder(order.id, value ?? "");
+        else await reopenWorkOrder(order.id);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setWoBusy(null);
+      }
+    },
+    [],
+  );
+
+  const resubmit = useCallback(async () => {
+    if (!selected) return;
+    setBusyId(selected.event_id);
+    setError(null);
+    try {
+      const result = await resubmitEvent(selected.event_id);
+      setSelectedId(result.event_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  }, [selected]);
+
   if (checking) {
     return (
       <main className="flex min-h-screen items-center justify-center text-sm text-slate-500">
@@ -222,12 +265,13 @@ export default function DashboardPage() {
               approver={user.username}
               onDecide={decide}
               onRetry={retry}
+              onResubmit={resubmit}
             />
           </div>
         </div>
 
         <div className="mt-4">
-          <WorkOrderTable orders={orders} />
+          <WorkOrderTable orders={orders} onAction={woAction} busyId={woBusy} />
         </div>
 
         <p className="mt-3 text-[11px] text-slate-400">

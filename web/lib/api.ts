@@ -113,3 +113,29 @@ export async function fetchTelemetry(
   const body = (await res.json()) as { points: TelemetryPoint[] };
   return [...body.points].reverse();
 }
+
+/* --------------------------- 工单流转 / 复议 --------------------------- */
+
+async function postJson<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: headers(),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as T;
+}
+
+export const assignWorkOrder = (orderId: number, assignee: string) =>
+  postJson<{ ok: boolean }>(`/api/work_orders/${orderId}/assign`, { assignee });
+
+export const closeWorkOrder = (orderId: number, resolution: string) =>
+  postJson<{ ok: boolean }>(`/api/work_orders/${orderId}/close`, { resolution });
+
+export const reopenWorkOrder = (orderId: number) =>
+  postJson<{ ok: boolean }>(`/api/work_orders/${orderId}/reopen`);
+
+export const resubmitEvent = (eventId: string) =>
+  postJson<{ ok: boolean; event_id: string; retry_of: string }>(
+    `/api/events/${encodeURIComponent(eventId)}/resubmit`,
+  );
