@@ -152,7 +152,7 @@ export default function TodoPage() {
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="sticky top-0 z-10 border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-5xl items-center gap-3 px-5 py-3">
+        <div className="mx-auto flex max-w-[1600px] items-center gap-3 px-6 py-3">
           <Link href="/" className="text-sm text-slate-600 underline-offset-2 hover:underline">
             ← 返回看板
           </Link>
@@ -193,7 +193,7 @@ export default function TodoPage() {
         ) : null}
       </header>
 
-      <main className="mx-auto max-w-5xl space-y-5 px-5 py-4">
+      <main className="mx-auto max-w-[1600px] space-y-5 px-6 py-4">
         <MyStats orders={myAll} />
 
         <section>

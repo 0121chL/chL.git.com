@@ -478,7 +478,7 @@ export default function DashboardPage() {
         onSignOut={signOut}
       />
 
-      <main className="mx-auto max-w-[1400px] px-5 py-4">
+      <main className="mx-auto max-w-[1600px] px-6 py-4">
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
           <div className="h-[620px] lg:col-span-4">
             <EventList events={events} selectedId={selectedId} onSelect={setSelectedId} />

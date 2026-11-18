@@ -1,4 +1,4 @@
-# 安全监测 Agent Demo
+﻿# 安全监测 Agent Demo
 
 本地可运行的一条完整链路：**模拟传感器 → MQTT → 规则引擎 → LangGraph Agent → 人工审批 → SQLite 工单 → Next.js 看板**。
 无云服务、无 API Key。
@@ -319,7 +319,7 @@ SSE 票据只发给审批人，工程师的待办走轮询。
 - 右上角补了「设置 / 退出登录」（之前只有看板有）
 
 `GET /api/work-orders` 现在每条都带 `sla`（时限/截止/剩余），列表也能显示「剩 N 分钟 / 已超时」。
-截图见 `docs/screenshots/engineer-todo.png`。
+截图见 `docs/screenshots/engineer-todo-wide.png`。
 
 ### 审批人邀请码（防"自称审批人"）
 

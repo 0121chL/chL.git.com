@@ -332,7 +332,7 @@ export default function SettingsPage() {
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="sticky top-0 z-10 border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-4xl items-center gap-4 px-5 py-3">
+        <div className="mx-auto flex max-w-6xl items-center gap-4 px-6 py-3">
           <Link href="/" className="text-sm text-slate-600 underline-offset-2 hover:underline">
             ← 返回看板
           </Link>
@@ -354,7 +354,7 @@ export default function SettingsPage() {
         ) : null}
       </header>
 
-      <main className="mx-auto max-w-4xl space-y-4 px-5 py-4">
+      <main className="mx-auto max-w-6xl space-y-4 px-6 py-4">
         <Card
           title="审批与处置偏好"
           desc="只影响你自己的操作习惯，不会改动规则阈值或他人的审批记录。"
