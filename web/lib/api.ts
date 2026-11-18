@@ -110,7 +110,18 @@ export async function fetchInvite(): Promise<{
   return (await res.json()) as { invite_code: string; source: string; file: string };
 }
 
-/** 轮换邀请码：旧码立即失效（环境变量控制时后端会 409） */
+/** 指定邀请码：旧码立即失效（环境变量控制时后端会 409） */
+export async function setInvite(code: string): Promise<{ invite_code: string; source: string }> {
+  const res = await fetch(`${API_BASE}/api/auth/invite/set`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) throw await toApiError(res);
+  return (await res.json()) as { invite_code: string; source: string };
+}
+
+/** 随机轮换邀请码：旧码立即失效（环境变量控制时后端会 409） */
 export async function rotateInvite(): Promise<{ invite_code: string; source: string }> {
   const res = await fetch(`${API_BASE}/api/auth/invite/rotate`, {
     method: "POST",

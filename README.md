@@ -1,4 +1,4 @@
-﻿# 安全监测 Agent Demo
+# 安全监测 Agent Demo
 
 本地可运行的一条完整链路：**模拟传感器 → MQTT → 规则引擎 → LangGraph Agent → 人工审批 → SQLite 工单 → Next.js 看板**。
 无云服务、无 API Key。
@@ -327,9 +327,11 @@ SSE 票据只发给审批人，工程师的待办走轮询。
 |---|---|
 | 首次启动 | 自动生成 `XXXX-XXXX`，打印到后端控制台，并写入 `data/approver_invite.txt`（不入库、不进 Git） |
 | 注册审批人 | 必须填对邀请码，否则 403；工程师注册不需要 |
-| 查看 | 「设置 → 审批人邀请码」（仅审批人），或 `GET /api/auth/invite` |
-| 轮换 | 设置页「轮换邀请码」/ `POST /api/auth/invite/rotate`，旧码立即失效并写审计 |
-| 生产部署 | 用环境变量 `APPROVER_INVITE_CODE` 指定（此时页面不能轮换，避免被人随手改） |
+| **自己设置** | 「设置 → 审批人邀请码」直接改：输入 4–32 位（字母/数字/下划线/横线）→ 保存，旧码立即失效并写审计。仓库里第一个审批人（如 A王五）登录后就能把自己的码设成 `WANGWU-2026` |
+| 查看 | 同上，仅审批人可见；或 `GET /api/auth/invite` |
+| 随机生成 | 设置页「随机生成一个」/ `POST /api/auth/invite/rotate` |
+| 指定 | `POST /api/auth/invite/set`（body `{"code": "..."}`） |
+| 生产部署 | 用环境变量 `APPROVER_INVITE_CODE` 指定（此时页面上改不动，避免被人随手改） |
 
 ## 环境备注（本机）
 

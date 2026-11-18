@@ -21,6 +21,7 @@ import {
   revokeAllSessions,
   rotateInvite,
   saveSettings,
+  setInvite as saveInviteCode,
   syncShifts,
   type RejectStats,
   type SessionRow,
@@ -82,6 +83,7 @@ export default function SettingsPage() {
   const [stats, setStats] = useState<RejectStats | null>(null);
   const [canManage, setCanManage] = useState(false);
   const [invite, setInvite] = useState<{ invite_code: string; source: string } | null>(null);
+  const [inviteDraft, setInviteDraft] = useState("");
   const [inviteError, setInviteError] = useState<string | null>(null);
 
   const [staffList, setStaffList] = useState<Staff[]>([]);
@@ -130,7 +132,9 @@ export default function SettingsPage() {
       if (manage) {
         setStaffList(await fetchStaff(false).catch(() => []));
         setShiftInfo(await fetchShifts().catch(() => null));
-        setInvite(await fetchInvite().catch(() => null));
+        const currentInvite = await fetchInvite().catch(() => null);
+        setInvite(currentInvite);
+        setInviteDraft(currentInvite?.invite_code ?? "");
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
@@ -306,17 +310,46 @@ export default function SettingsPage() {
     }
   }
 
+  async function saveApproverInvite() {
+    setInviteError(null);
+    const code = inviteDraft.trim();
+    if (!/^[A-Za-z0-9_-]{4,32}$/.test(code)) {
+      setInviteError("邀请码 4–32 位，只能用字母、数字、下划线、横线");
+      return;
+    }
+    if (code === invite?.invite_code) {
+      setInviteError("和当前邀请码一样，不用改");
+      return;
+    }
+    try {
+      const saved = await saveInviteCode(code);
+      setInvite(saved);
+      setInviteDraft(saved.invite_code);
+      setNotice("邀请码已更新，旧码立即失效");
+    } catch (err) {
+      setInviteError(err instanceof Error ? err.message : String(err));
+      if (err instanceof ApiError && err.status === 409) {
+        const current = await fetchInvite().catch(() => null);
+        setInvite(current);
+        setInviteDraft(current?.invite_code ?? "");
+      }
+    }
+  }
+
   async function rotateApproverInvite() {
-    if (!window.confirm("轮换后旧邀请码立即失效，确定继续？")) return;
+    if (!window.confirm("随机生成后旧邀请码立即失效，确定继续？")) return;
     setInviteError(null);
     try {
       const fresh = await rotateInvite();
       setInvite(fresh);
+      setInviteDraft(fresh.invite_code);
       setNotice("邀请码已轮换，旧码立即失效");
     } catch (err) {
       setInviteError(err instanceof Error ? err.message : String(err));
       if (err instanceof ApiError && err.status === 409) {
-        setInvite(await fetchInvite().catch(() => null));
+        const current = await fetchInvite().catch(() => null);
+        setInvite(current);
+        setInviteDraft(current?.invite_code ?? "");
       }
     }
   }
@@ -537,27 +570,42 @@ export default function SettingsPage() {
           desc="别人注册「审批人」时必须填写这个码；工程师注册不需要。"
         >
           <div className="flex flex-wrap items-center gap-2 text-xs">
-            <code
-              className="rounded bg-slate-100 px-2 py-1 font-mono text-sm tracking-widest text-slate-800"
-              data-testid="invite-code"
+            <label className="text-slate-500" htmlFor="invite-input">
+              当前邀请码
+            </label>
+            <input
+              id="invite-input"
+              value={inviteDraft}
+              onChange={(e) => setInviteDraft(e.target.value)}
+              maxLength={32}
+              spellCheck={false}
+              placeholder="A-WANGWU-2026"
+              className="w-52 rounded border border-slate-300 px-2 py-1 font-mono text-sm tracking-wide text-slate-900 outline-none focus:border-slate-500"
+              data-testid="invite-input"
+            />
+            <button
+              type="button"
+              onClick={saveApproverInvite}
+              className="rounded-md bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-slate-800"
+              data-testid="invite-save"
             >
-              {invite?.invite_code ?? "—"}
-            </code>
-            <span className="text-slate-400">
-              来源：{invite?.source === "env" ? "环境变量" : "data/approver_invite.txt"}
-            </span>
+              保存
+            </button>
             <button
               type="button"
               onClick={rotateApproverInvite}
               className="rounded border border-slate-300 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
               data-testid="invite-rotate"
             >
-              轮换邀请码
+              随机生成一个
             </button>
+            <span className="text-slate-400">
+              来源：{invite?.source === "env" ? "环境变量" : "data/approver_invite.txt"}
+            </span>
           </div>
           <p className="mt-1.5 text-[11px] text-slate-400">
-            轮换后旧码立即失效。生产环境建议用环境变量 <code>APPROVER_INVITE_CODE</code> 控制
-            （此时页面不能轮换）。首次启动的邀请码会打印在后端控制台。
+            改完立即生效，旧码马上作废（已注册的账号不受影响）。4–32 位，只能用字母、数字、下划线、横线。
+            环境变量 <code>APPROVER_INVITE_CODE</code> 优先于这里，设了环境变量页面上就改不动。
           </p>
           {inviteError ? (
             <p className="mt-1 text-xs text-rose-600" data-testid="invite-error">

@@ -1715,32 +1715,59 @@ def read_invite() -> dict[str, Any]:
     }
 
 
-@app.post("/api/auth/invite/rotate", dependencies=[Depends(require_approver)])
-def rotate_invite(user: dict[str, Any] = Depends(require_approver)) -> dict[str, Any]:
-    """轮换邀请码：旧码立即失效（环境变量控制时不允许在页面里轮换）。"""
+class InviteSetBody(BaseModel):
+    code: str
+
+
+# 邀请码允许的字符：字母/数字/下划线/横线，4–32 位（方便口头传达，不会打出奇怪符号）
+INVITE_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{4,32}$")
+
+
+def _persist_invite(code: str, user: dict[str, Any], action: str) -> dict[str, Any]:
+    """落盘 + 内存生效 + 审计。环境变量控制时拒绝（以环境变量为准）。"""
     global APPROVER_INVITE, APPROVER_INVITE_SOURCE
     if APPROVER_INVITE_SOURCE == "env":
         raise HTTPException(
             status_code=409,
-            detail="邀请码由环境变量 APPROVER_INVITE_CODE 控制，改文件不会生效；请改环境变量后重启",
+            detail="邀请码由环境变量 APPROVER_INVITE_CODE 控制，页面改不动；请改环境变量后重启",
         )
-    new_code = _new_invite_code()
     try:
         APPROVER_INVITE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        APPROVER_INVITE_FILE.write_text(new_code + "\n", encoding="utf-8")
+        APPROVER_INVITE_FILE.write_text(code + "\n", encoding="utf-8")
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"写入邀请码失败：{exc}") from None
-    APPROVER_INVITE = new_code
+    APPROVER_INVITE = code
     APPROVER_INVITE_SOURCE = "file"
     db.upsert_audit(
         DB_PATH,
         "approver_invite",
-        f"rotated@{utcnow()}",
-        json.dumps({"by": user["username"]}, ensure_ascii=False),
+        f"{action}@{utcnow()}",
+        json.dumps({"by": user["username"], "code": code}, ensure_ascii=False),
     )
+    print(f"[auth] 审批人邀请码已{action}（by {user['username']}）：{code}", flush=True)
+    return {"invite_code": code, "source": "file", "updated_by": user["username"]}
+
+
+@app.post("/api/auth/invite/set", dependencies=[Depends(require_approver)])
+def set_invite(body: InviteSetBody, user: dict[str, Any] = Depends(require_approver)) -> dict[str, Any]:
+    """审批人自己指定邀请码（旧码立即失效）。"""
+    code = (body.code or "").strip()
+    if not INVITE_CODE_RE.match(code):
+        raise HTTPException(
+            status_code=422,
+            detail="邀请码 4–32 位，只能包含字母、数字、下划线、横线（例如 A-WANGWU-2026）",
+        )
+    result = _persist_invite(code, user, "set")
+    inc("approver_invite_set_total")
+    return result
+
+
+@app.post("/api/auth/invite/rotate", dependencies=[Depends(require_approver)])
+def rotate_invite(user: dict[str, Any] = Depends(require_approver)) -> dict[str, Any]:
+    """随机轮换邀请码：旧码立即失效（环境变量控制时不允许在页面里轮换）。"""
+    result = _persist_invite(_new_invite_code(), user, "rotated")
     inc("approver_invite_rotated_total")
-    print(f"[auth] 审批人邀请码已轮换（by {user['username']}）", flush=True)
-    return {"invite_code": new_code, "source": "file"}
+    return result
 
 
 @app.get("/api/auth/sessions")

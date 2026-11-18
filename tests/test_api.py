@@ -1219,3 +1219,63 @@ def test_invite_rotate_blocked_when_env_controlled(client, auth):
     res = client.post("/api/auth/invite/rotate", headers=auth["headers"])
     assert res.status_code == 409, res.text
     assert "环境变量" in res.json()["detail"]
+
+
+def test_approver_can_set_invite_code(client, auth, monkeypatch, tmp_path):
+    """审批人自己指定邀请码（比如 A王五 设成自己的码），旧码立即失效。"""
+    import backend_server as bs
+
+    invite_file = tmp_path / "invite.txt"
+    monkeypatch.setattr(bs, "APPROVER_INVITE_FILE", invite_file)
+    monkeypatch.setattr(bs, "APPROVER_INVITE_SOURCE", "file")
+    monkeypatch.setattr(bs, "APPROVER_INVITE", "OLD-CODE")
+
+    res = client.post(
+        "/api/auth/invite/set", json={"code": "A-WANGWU-2026"}, headers=auth["headers"]
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["invite_code"] == "A-WANGWU-2026"
+    assert invite_file.read_text(encoding="utf-8").strip() == "A-WANGWU-2026"
+
+    old = client.post(
+        "/api/auth/register",
+        json={
+            "username": f"old_{uuid.uuid4().hex[:6]}",
+            "password": "pass12345",
+            "role": "approver",
+            "invite_code": "OLD-CODE",
+        },
+    )
+    assert old.status_code == 403, old.text
+
+    fresh = client.post(
+        "/api/auth/register",
+        json={
+            "username": f"brand_{uuid.uuid4().hex[:6]}",
+            "password": "pass12345",
+            "role": "approver",
+            "invite_code": "A-WANGWU-2026",
+        },
+    )
+    assert fresh.status_code == 200, fresh.text
+
+
+@pytest.mark.parametrize("bad", ["ab", "带空格 的码", "x" * 33, "A B C"])
+def test_invite_set_rejects_bad_format(client, auth, monkeypatch, tmp_path, bad):
+    import backend_server as bs
+
+    monkeypatch.setattr(bs, "APPROVER_INVITE_FILE", tmp_path / "invite.txt")
+    monkeypatch.setattr(bs, "APPROVER_INVITE_SOURCE", "file")
+    res = client.post("/api/auth/invite/set", json={"code": bad}, headers=auth["headers"])
+    assert res.status_code == 422, res.text
+
+
+def test_engineer_cannot_set_invite(client):
+    _name, headers = _register_operator(client)
+    res = client.post("/api/auth/invite/set", json={"code": "HACK-1234"}, headers=headers)
+    assert res.status_code == 403, res.text
+
+
+def test_invite_set_blocked_when_env_controlled(client, auth):
+    res = client.post("/api/auth/invite/set", json={"code": "NEW-CODE"}, headers=auth["headers"])
+    assert res.status_code == 409, res.text
