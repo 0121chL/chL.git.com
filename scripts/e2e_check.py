@@ -77,11 +77,26 @@ def post(path: str, body: dict[str, Any], auth: bool = True) -> tuple[int, dict[
     return resp.status, data
 
 
+def _approver_invite() -> str:
+    """审批人注册要邀请码：优先环境变量，其次 data/approver_invite.txt。"""
+    import os
+    from pathlib import Path
+
+    code = (os.environ.get("APPROVER_INVITE_CODE") or "").strip()
+    if code:
+        return code
+    path = Path(__file__).resolve().parent.parent / "data" / "approver_invite.txt"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def bootstrap_user(username: str = "验收脚本", password: str = "test123456") -> str:
     """注册或登录，返回 token（不修改全局 TOKEN）。"""
-    status, body = post("/api/auth/register", {"username": username, "password": password}, auth=False)
+    status, body = post("/api/auth/register", {"username": username, "password": password, "role": "approver", "invite_code": _approver_invite()}, auth=False)
     if status == 409:
-        status, body = post("/api/auth/login", {"username": username, "password": password}, auth=False)
+        status, body = post("/api/auth/login", {"username": username, "password": password, "role": "approver", "invite_code": _approver_invite()}, auth=False)
     if status == 200:
         return body.get("token", "")
     print(f"  ! 登录失败：{status} {body}")

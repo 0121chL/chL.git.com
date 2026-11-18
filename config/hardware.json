@@ -1,0 +1,65 @@
+{
+  "_comment": "硬件接线与标定的单一记录。scripts/hw_check.py 用它校验设备上报；固件 config.h 要与这里保持一致。",
+  "device_id": "esp32s3-line1-01",
+  "line": "line1",
+  "fw_version": "1.0.0",
+  "mqtt": {
+    "telemetry_topic": "line1/telemetry",
+    "heartbeat_topic": "line1/heartbeat",
+    "publish_interval_ms": 1000,
+    "heartbeat_interval_ms": 2000
+  },
+  "pins": {
+    "mq4_adc": 1,
+    "ds18b20": 4,
+    "mpu_sda": 8,
+    "mpu_scl": 9,
+    "sw420": 5,
+    "status_led": 2
+  },
+  "sensors": {
+    "ch4": {
+      "source": "MQ-4",
+      "unit": "%",
+      "bus": "ADC1",
+      "vcc": 5.0,
+      "rl_ohm": 10000,
+      "r0_ohm": 3000,
+      "adc_divider": 2.0,
+      "curve": { "a": 1000.0, "b": -2.19 },
+      "clean_air_pct": 0.0,
+      "range": [0, 100],
+      "note": "r0 是 1000 ppm 时的 Rs（= 洁净空气 Rs / 4.4）；1 % vol = 10000 ppm；MQ-4 属演示级传感，非计量级"
+    },
+    "temp": {
+      "source": "DS18B20",
+      "unit": "C",
+      "bus": "1-Wire",
+      "range": [-50, 120],
+      "note": "测的是探头所在环境温度，手捏/哈气可到 30–38℃，到不了轴承 85℃"
+    },
+    "vibration": {
+      "source": "MPU6050",
+      "unit": "mm/s",
+      "bus": "I2C",
+      "addr": "0x68",
+      "freq_hz": 25.0,
+      "range": [0, 200],
+      "note": "a_rms/(2πf) 的工程近似，用于驱动 4.5 mm/s 规则，不是 ISO 10816 计量"
+    }
+  },
+  "wiring": [
+    { "from": "MQ-4 VCC", "to": "5V (VIN)", "note": "加热丝约 150 mA，必须接 5 V" },
+    { "from": "MQ-4 GND", "to": "GND", "note": "" },
+    { "from": "MQ-4 AO", "to": "分压 R1=10k → GPIO1 → R2=10k → GND", "note": "AO 最高 5 V，直连会烧 ADC" },
+    { "from": "DS18B20 VDD", "to": "3V3", "note": "寄生供电也可，但建议三线" },
+    { "from": "DS18B20 DQ", "to": "GPIO4", "note": "DQ 与 3V3 之间加 4.7k 上拉" },
+    { "from": "DS18B20 GND", "to": "GND", "note": "" },
+    { "from": "MPU6050 VCC", "to": "3V3", "note": "不要接 5 V" },
+    { "from": "MPU6050 GND", "to": "GND", "note": "" },
+    { "from": "MPU6050 SDA", "to": "GPIO8", "note": "" },
+    { "from": "MPU6050 SCL", "to": "GPIO9", "note": "" },
+    { "from": "SW-420 VCC", "to": "3V3", "note": "仅 VIBRATION_MODE_MPU6050=0 时使用" },
+    { "from": "SW-420 DO", "to": "GPIO5", "note": "" }
+  ]
+}

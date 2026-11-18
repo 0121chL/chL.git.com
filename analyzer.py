@@ -147,6 +147,26 @@ def validate_grounding(analysis: dict[str, Any], allowed_ids: list[str]) -> list
     return basis_ids
 
 
+_RISK_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def clamp_risk_to_severity(
+    analysis: dict[str, Any], event: dict[str, Any]
+) -> tuple[dict[str, Any], bool]:
+    """风险等级不得低于事件严重度。
+
+    prompts.SYSTEM_PROMPT 第 7 条只是"要求"，小模型经常不听；接地校验也不管
+    risk_level。所以这里用代码兜底：severity=high 的事件不可能输出 low。
+    """
+    severity = str(event.get("severity") or "").strip().lower()
+    if severity not in _RISK_RANK:
+        return analysis, False
+    current = _RISK_RANK.get(str(analysis.get("risk_level")), 0)
+    if current >= _RISK_RANK[severity]:
+        return analysis, False
+    return {**analysis, "risk_level": severity}, True
+
+
 def analyze_event(
     event: dict[str, Any],
     *,
@@ -168,11 +188,13 @@ def analyze_event(
         raw = llm_client.chat(prompts.SYSTEM_PROMPT, user, model=model, temperature=0.1)
         try:
             analysis = parse_analysis(raw)
+            analysis, risk_clamped = clamp_risk_to_severity(analysis, event)
             cited = validate_grounding(analysis, allowed_ids)
             _LAST_META.update(
                 {
                     "attempt": attempt,
                     "cited": cited,
+                    "risk_clamped": risk_clamped,
                     "retrieved": [
                         {"clause_id": c["clause_id"], "score": c["score"]} for c in clauses
                     ],

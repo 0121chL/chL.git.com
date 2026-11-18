@@ -3,6 +3,7 @@
   "cooldown_s": 30,
   "trend_window_s": 60,
   "merge_window_s": 10,
+  "refresh_s": 60,
   "telemetry": {
     "persist": true,
     "retention_hours": 24

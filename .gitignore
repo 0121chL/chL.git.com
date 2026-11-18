@@ -34,6 +34,8 @@ Thumbs.db
 # 环境与密钥
 .env
 .env.local
+# 固件里的 Wi-Fi / MQTT 口令（从 config.example.h 复制）
+firmware/**/config.h
 
 # 安装包
 *.zip

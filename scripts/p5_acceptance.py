@@ -50,12 +50,27 @@ def request(method: str, path: str, body: dict[str, Any] | None = None, timeout:
             return exc.code, {"detail": raw}
 
 
+def _approver_invite() -> str:
+    """审批人注册要邀请码：优先环境变量，其次 data/approver_invite.txt。"""
+    import os
+    from pathlib import Path
+
+    code = (os.environ.get("APPROVER_INVITE_CODE") or "").strip()
+    if code:
+        return code
+    path = Path(__file__).resolve().parent.parent / "data" / "approver_invite.txt"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def bootstrap_user(username: str = "测试审批人", password: str = "test123456") -> bool:
     """注册（或登录）一个验收用账号，后续请求都带它的会话 token。"""
     global TOKEN
-    status, body = request("POST", "/api/auth/register", {"username": username, "password": password})
+    status, body = request("POST", "/api/auth/register", {"username": username, "password": password, "role": "approver", "invite_code": _approver_invite()})
     if status == 409:
-        status, body = request("POST", "/api/auth/login", {"username": username, "password": password})
+        status, body = request("POST", "/api/auth/login", {"username": username, "password": password, "role": "approver", "invite_code": _approver_invite()})
     if status != 200 or not body.get("token"):
         print(f"  登录取 token 失败：{status} {body}")
         return False

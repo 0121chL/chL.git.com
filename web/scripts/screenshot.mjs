@@ -4,6 +4,16 @@
  */
 import puppeteer from "puppeteer-core";
 
+
+function approverInvite() {
+  if (process.env.APPROVER_INVITE_CODE) return process.env.APPROVER_INVITE_CODE.trim();
+  try {
+    return readFileSync(new URL("../data/approver_invite.txt", import.meta.url), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
 const EDGE = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 const APP = "http://localhost:3000/";
 const arg = (name, fallback) => {
@@ -41,7 +51,7 @@ const uname = `shot${Date.now().toString().slice(-6)}`;
 let authRes = await fetch(`${BACKEND}/api/auth/register`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ username: uname, password: "test123456" }),
+  body: JSON.stringify({ username: uname, password: "test123456", role: "approver", invite_code: approverInvite() }),
 });
 if (authRes.status === 409) {
   authRes = await fetch(`${BACKEND}/api/auth/login`, {

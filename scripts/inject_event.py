@@ -45,6 +45,8 @@ SCENARIOS: dict[str, dict] = {
         "sensor": "ch4",
         "severity": "high",
         "observed": {"value": 1.8, "unit": "%", "threshold": 1.0},
+        # 趋势规则的触发依据是"窗口内涨幅"，不是绝对限值
+        "trigger": {"kind": "trend", "delta": 0.62, "delta_threshold": 0.5, "window_s": 60, "unit": "%"},
         "window": {"samples": 60, "mean": 0.9, "max": 1.8, "slope_per_min": 0.65},
         "sensors": {
             "ch4": {"value": 1.8, "unit": "%", "delta_1m": 0.62},
@@ -59,6 +61,7 @@ SCENARIOS: dict[str, dict] = {
         "sensor": "temp",
         "severity": "high",
         "observed": {"value": 93.5, "unit": "C", "threshold": 85.0},
+        "trigger": {"kind": "threshold", "value": 93.5, "threshold": 85.0, "unit": "C"},
         "window": {"samples": 30, "mean": 71.4, "max": 93.5, "slope_per_min": 1.8},
         "sensors": {
             "temp": {"value": 93.5, "unit": "C", "delta_1m": 6.2},
@@ -72,6 +75,7 @@ SCENARIOS: dict[str, dict] = {
         "sensor": "vibration",
         "severity": "medium",
         "observed": {"value": 4.8, "unit": "mm/s", "threshold": 4.5},
+        "trigger": {"kind": "threshold", "value": 4.8, "threshold": 4.5, "unit": "mm/s"},
         "window": {"samples": 60, "mean": 3.9, "max": 4.8, "slope_per_min": 0.6},
         "sensors": {
             "vibration": {"value": 4.8, "unit": "mm/s", "delta_1m": 0.6},
@@ -97,6 +101,7 @@ def build_event(scenario: str) -> dict:
         "severity": spec["severity"],
         "triggered_at": now.isoformat(timespec="seconds"),
         "observed": spec["observed"],
+        "trigger": spec.get("trigger"),
         "window": spec["window"],
         "snapshot": {"sensors": spec["sensors"]},
         "scenario_id": scenario,

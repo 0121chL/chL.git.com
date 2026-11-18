@@ -132,7 +132,9 @@ def make_human_review_node(db_path: Path):
     def human_review_node(state: AgentState) -> dict[str, Any]:
         _EXECUTIONS["human_review_node"] += 1
         event = state["event"]
-        analysis = state["analysis"]
+        # 延迟分析模式下，state 里只有「规则处置卡」；缺了就退化成空字典，
+        # 绝不能让审批因为"没有 AI 结论"而卡住。
+        analysis = state.get("analysis") or {}
 
         # ---- interrupt() 之前的副作用：必须幂等（resume 会重跑本节点）----
         db.upsert_audit(
@@ -165,13 +167,22 @@ def make_create_work_order_node(db_path: Path):
         _EXECUTIONS["create_work_order_node"] += 1
         event = state["event"]
         event_id = event["event_id"]
+
+        # 延迟分析：审批通过时 AI 可能还没算完。工单里存"审批那一刻看到的版本"，
+        # 优先用 state 里的，没有就回落到库里已存的（规则卡或后到的 AI 结论）。
+        analysis = state.get("analysis")
+        if not analysis:
+            stored = db.get_event(db_path, event_id) or {}
+            analysis = stored.get("analysis")
+
         content = json.dumps(
             {
                 "event_id": event_id,
                 "rule_id": event.get("rule_id"),
                 "sensor": event.get("sensor"),
                 "observed": event.get("observed"),
-                "analysis": state.get("analysis"),
+                "aggregate": event.get("aggregate"),
+                "analysis": analysis,
                 "approval": "manual-approved",
                 "approval_decision": state.get("approval_decision"),
             },
@@ -208,31 +219,42 @@ def build_app(
     checkpointer: Any | None = None,
     analyze_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     tools_fn: Callable[[dict[str, Any], list[str]], dict[str, Any]] | None = None,
+    defer_analysis: bool = False,
 ):
-    """默认用「检索 + LLM」的 analyzer；测试可注入 mock 分析函数（接口不变）。
+    """编译审批图。
 
-    图结构：START → plan → (tools) → analyze → interrupt → 批准/驳回。
-    tools 节点给分析补充设备状态/近期事件等上下文，不改变审批闸门的位置。
+    defer_analysis=False（默认，向后兼容）：
+        START → plan → (tools) → analyze → interrupt → 批准/驳回
+    defer_analysis=True（P0-4，后端默认用这个）：
+        START → interrupt → 批准/驳回
+        分析不在这张图里：后端先用「规则处置卡」把事件推到可审批，AI 结论
+        由后台线程补写。图越短，审批路径越不可能被模型拖慢。
+
+    两种模式下审批闸门的位置都一样：写工单只发生在 interrupt 之后。
     """
     path = db.init_db(db_path)
     analyze = analyze_fn or analyzer_mod.analyze_event
 
     graph = StateGraph(AgentState)
-    graph.add_node("plan_node", plan_node)
-    graph.add_node("tools_node", make_tools_node(tools_fn))
-    graph.add_node("analyze_node", make_analyze_node(path, analyze))
     graph.add_node("human_review_node", make_human_review_node(path))
     graph.add_node("create_work_order_node", make_create_work_order_node(path))
     graph.add_node("reject_node", make_reject_node(path))
 
-    graph.add_edge(START, "plan_node")
-    graph.add_conditional_edges(
-        "plan_node",
-        route_after_plan,
-        {"tools_node": "tools_node", "analyze_node": "analyze_node"},
-    )
-    graph.add_edge("tools_node", "analyze_node")
-    graph.add_edge("analyze_node", "human_review_node")
+    if defer_analysis:
+        graph.add_edge(START, "human_review_node")
+    else:
+        graph.add_node("plan_node", plan_node)
+        graph.add_node("tools_node", make_tools_node(tools_fn))
+        graph.add_node("analyze_node", make_analyze_node(path, analyze))
+        graph.add_edge(START, "plan_node")
+        graph.add_conditional_edges(
+            "plan_node",
+            route_after_plan,
+            {"tools_node": "tools_node", "analyze_node": "analyze_node"},
+        )
+        graph.add_edge("tools_node", "analyze_node")
+        graph.add_edge("analyze_node", "human_review_node")
+
     graph.add_conditional_edges(
         "human_review_node",
         route_after_review,

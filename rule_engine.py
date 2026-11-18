@@ -35,6 +35,9 @@ TELEMETRY_TOPIC = "line1/telemetry"
 HISTORY = 180
 WINDOW = 90
 DEFAULT_DEVICE = "line1-dev-01"
+# 与后端共用同一个库：以前写死 db.DEFAULT_DB_PATH，设了 MONITOR_DB 就会出现
+# 「后端读 A 库、规则引擎写 B 库」，遥测图表全空。
+DB_PATH = db.resolve_db_path()
 
 UNIT_BY_SENSOR = {
     "ch4": "%",
@@ -56,6 +59,8 @@ def load_rules(path: Path) -> dict[str, Any]:
         ("cooldown_s", 30),
         ("trend_window_s", 60),
         ("merge_window_s", 10),
+        # 持续超限时，多久刷新一次同一条事件的“持续”字段（秒）
+        ("refresh_s", 60),
     ):
         data.setdefault(key, default)
     data.setdefault("sensors", {})
@@ -65,11 +70,22 @@ def load_rules(path: Path) -> dict[str, Any]:
 
 
 def append_event(event: dict[str, Any]) -> None:
+    """追加到 events.jsonl；超过 8 MB 滚一份 .1，避免演示跑一天就几百 MB。"""
+    try:
+        if EVENTS_FILE.exists() and EVENTS_FILE.stat().st_size > 8 * 1024 * 1024:
+            EVENTS_FILE.replace(EVENTS_FILE.with_suffix(".jsonl.1"))
+    except OSError:
+        pass
     with EVENTS_FILE.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
-def post_event(backend: str, event: dict[str, Any]) -> bool:
+def post_event(backend: str, event: dict[str, Any]) -> str:
+    """投递一条事件，返回 "ok" / "retry" / "drop"。
+
+    "drop" 用于永久性失败（4xx，例如后端 422 拒收）：这类事件重投一万次
+    也不会成功，必须进死信，否则一个坏事件能把重投队列永久占住。
+    """
     req = urllib.request.Request(
         f"{backend}/events",
         data=json.dumps(event, ensure_ascii=False).encode("utf-8"),
@@ -80,28 +96,165 @@ def post_event(backend: str, event: dict[str, Any]) -> bool:
         with urllib.request.urlopen(req, timeout=5) as resp:
             body = resp.read().decode("utf-8")[:120]
             print(f"[rule] POST /events -> {resp.status} {body}", flush=True)
-            return True
+            return "ok"
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:120]
+        except Exception:  # noqa: BLE001 - 读错误体失败不影响判定
+            pass
+        print(f"[rule] POST /events -> HTTP {exc.code} {detail}", flush=True)
+        permanent = 400 <= exc.code < 500 and exc.code != 429
+        return "drop" if permanent else "retry"
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         print(f"[rule] POST /events 失败：{exc}", flush=True)
+        return "retry"
+
+
+def refresh_event(backend: str, event_id: str | None, aggregate: dict[str, Any]) -> bool:
+    """把“持续超限 / 已恢复”的聚合信息刷到已存在的事件上。
+
+    不新建事件、不新增审批：值班员看到的是同一条事件在持续更新，
+    而不是被 merge 窗口吞掉、或者一分钟一条地把队列刷满。
+    """
+    if not event_id:
+        return False
+    req = urllib.request.Request(
+        f"{backend}/events/{event_id}/refresh",
+        data=json.dumps({"aggregate": aggregate}, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+        print(f"[rule] 刷新持续事件失败（{event_id}）：{exc}", flush=True)
         return False
 
 
-class Spooler:
-    """POST 失败的事件先落盘，后台重投；后端恢复后自动补齐。"""
+class SustainedTracker:
+    """持续告警的状态机（纯逻辑，便于单测）。
 
-    def __init__(self, directory: Path, backend: str, interval: float = 10.0) -> None:
+    以前 merge 窗口内的事件是直接丢弃的，值班端只能看到“某一秒超限”，
+    看不到“已经持续 20 分钟”。这里改成：
+      start  → 首次越限，调用方创建事件；
+      update → 仍在越限，累计次数/峰值，每 refresh_s 返回一次用于刷新；
+      clear  → 回落到阈值以下，返回一次用于标记已恢复。
+    """
+
+    def __init__(self, refresh_s: float = 60.0) -> None:
+        self.refresh_s = max(1.0, float(refresh_s))
+        self._active: dict[str, dict[str, Any]] = {}
+
+    def observe(self, key: str, value: float, threshold: float, now: float) -> dict[str, Any] | None:
+        state = self._active.get(key)
+        if value > threshold:
+            if state is None:
+                self._active[key] = {
+                    "first_ts": now,
+                    "count": 1,
+                    "peak": value,
+                    "last_refresh": now,
+                    "event_id": None,
+                }
+                return {
+                    "action": "start",
+                    "count": 1,
+                    "sustained_s": 0.0,
+                    "peak": value,
+                    "first_ts": now,
+                    "event_id": None,
+                }
+            state["count"] += 1
+            state["peak"] = max(state["peak"], value)
+            if now - state["last_refresh"] < self.refresh_s:
+                return None
+            state["last_refresh"] = now
+            return {
+                "action": "update",
+                "count": state["count"],
+                "sustained_s": round(now - state["first_ts"], 1),
+                "peak": round(state["peak"], 3),
+                "first_ts": state["first_ts"],
+                "event_id": state.get("event_id"),
+            }
+
+        if state is None:
+            return None
+        self._active.pop(key, None)
+        return {
+            "action": "clear",
+            "count": state["count"],
+            "sustained_s": round(now - state["first_ts"], 1),
+            "peak": round(state["peak"], 3),
+            "first_ts": state["first_ts"],
+            "event_id": state.get("event_id"),
+        }
+
+    def attach(self, key: str, event_id: str) -> None:
+        """首次事件创建成功后把 event_id 绑上去，后续刷新都指向它。"""
+        state = self._active.get(key)
+        if state is not None:
+            state["event_id"] = event_id
+
+    def drop(self, key: str) -> None:
+        """事件没建成（冷却/抑制）时清掉活动态，避免后续刷新指向空事件。"""
+        self._active.pop(key, None)
+
+
+def aggregate_payload(
+    transition: dict[str, Any],
+    value: float,
+    spec: dict[str, Any],
+    cleared: bool = False,
+) -> dict[str, Any]:
+    """把 tracker 的状态转成事件上的 aggregate 字段（前端与审批都用它看“持续多久”）。"""
+    first_ts = transition.get("first_ts")
+    since = None
+    if isinstance(first_ts, (int, float)):
+        since = datetime.fromtimestamp(first_ts, timezone.utc).astimezone().isoformat(timespec="seconds")
+    return {
+        "count": transition.get("count"),
+        "sustained_s": transition.get("sustained_s"),
+        "peak": transition.get("peak"),
+        "current": round(float(value), 3),
+        "unit": spec.get("unit", ""),
+        "threshold": spec.get("threshold"),
+        "cleared": cleared,
+        "first_seen": since,
+    }
+
+
+class Spooler:
+    """POST 失败的事件先落盘，后台重投；永久失败或重试超限的进 dead/ 死信。"""
+
+    def __init__(self, directory: Path, backend: str, interval: float = 10.0, max_attempts: int = 5) -> None:
         self.dir = directory
+        self.dead_dir = directory / "dead"
         self.backend = backend
         self.interval = interval
+        self.max_attempts = max(1, int(max_attempts))
         self.dir.mkdir(parents=True, exist_ok=True)
+        self.dead_dir.mkdir(parents=True, exist_ok=True)
         self._stop = threading.Event()
+        self._failures: dict[str, int] = {}
         self.pending = 0
 
     def save(self, event: dict[str, Any]) -> None:
         path = self.dir / f"{event['event_id']}.json"
         path.write_text(json.dumps(event, ensure_ascii=False), encoding="utf-8")
-        self.pending += 1
+        self.pending = len(list(self.dir.glob("*.json")))
         print(f"[spool] 已暂存 {path.name}（待重投 {self.pending}）", flush=True)
+
+    def _to_dead(self, path: Path, reason: str) -> None:
+        target = self.dead_dir / path.name
+        try:
+            path.replace(target)
+        except OSError:
+            path.unlink(missing_ok=True)
+        self._failures.pop(path.name, None)
+        print(f"[spool] 进死信 {target.name}（{reason}）", flush=True)
 
     def flush_once(self) -> int:
         sent = 0
@@ -109,11 +262,21 @@ class Spooler:
             try:
                 event = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
-                path.unlink(missing_ok=True)
+                self._to_dead(path, "文件损坏")
                 continue
-            if post_event(self.backend, event):
+            result = post_event(self.backend, event)
+            if result == "ok":
                 path.unlink(missing_ok=True)
+                self._failures.pop(path.name, None)
                 sent += 1
+                continue
+            if result == "drop":
+                self._to_dead(path, "后端拒收（4xx）")
+                continue
+            attempts = self._failures.get(path.name, 0) + 1
+            self._failures[path.name] = attempts
+            if attempts >= self.max_attempts:
+                self._to_dead(path, f"重试 {attempts} 次仍失败")
         self.pending = len(list(self.dir.glob("*.json")))
         if sent:
             print(f"[spool] 重投成功 {sent} 条，剩余 {self.pending}", flush=True)
@@ -152,17 +315,24 @@ def main() -> int:
     persist = bool(rules["telemetry"].get("persist", True))
     retention = float(rules["telemetry"].get("retention_hours", 24))
 
-    db.init_db(db.DEFAULT_DB_PATH)
-    spool = Spooler(ROOT / rules["spool"]["dir"], backend, float(rules["spool"]["retry_interval_s"]))
+    db.init_db(DB_PATH)
+    spool = Spooler(
+        ROOT / rules["spool"]["dir"],
+        backend,
+        float(rules["spool"]["retry_interval_s"]),
+        int(rules["spool"].get("max_attempts", 5)),
+    )
     spool.start()
 
     host, _, port = args.mqtt.partition(":")
     history: dict[str, deque] = defaultdict(lambda: deque(maxlen=HISTORY))
     last_fired: dict[str, float] = defaultdict(float)
     last_emitted: dict[str, float] = defaultdict(float)
+    tracker = SustainedTracker(float(rules.get("refresh_s", 60)))
 
     def make_event(device: str, sensor: str, value: float, spec: dict[str, Any],
-                   event_type: str, severity: str | None = None, rule_id: str | None = None) -> dict[str, Any]:
+                   event_type: str, severity: str | None = None, rule_id: str | None = None,
+                   trigger: dict[str, Any] | None = None) -> dict[str, Any]:
         key = f"{device}:{sensor}"
         points = list(history[key])[-WINDOW:]
         values = [p[1] for p in points] or [value]
@@ -192,6 +362,15 @@ def main() -> int:
             "severity": severity or spec.get("severity", "high"),
             "triggered_at": now_iso(),
             "observed": {"value": value, "unit": spec.get("unit", ""), "threshold": spec["threshold"]},
+            # 触发依据：阈值规则是「实测 ≥ 限值」，趋势规则是「窗口内涨幅 ≥ 阈值」。
+            # 以前两种情况都只写 observed.threshold，卡片会把趋势事件显示成"限值 1%"——
+            # 那是绝对限值，不是这条规则的触发条件，会误导审批。
+            "trigger": trigger or {
+                "kind": "threshold",
+                "value": value,
+                "threshold": spec["threshold"],
+                "unit": spec.get("unit", ""),
+            },
             "window": {
                 "samples": len(values),
                 "mean": round(sum(values) / len(values), 2),
@@ -202,12 +381,12 @@ def main() -> int:
             "scenario_id": "live_rule_engine",
         }
 
-    def fire(event: dict[str, Any], key: str) -> None:
+    def fire(event: dict[str, Any], key: str) -> bool:
         now = time.time()
         gap = now - last_emitted[key]
         if gap < merge_window:
             print(f"[rule] 合并：{event['rule_id']} 与 {gap:.1f}s 前的同测点事件同源，抑制", flush=True)
-            return
+            return False
         last_emitted[key] = now
         print(
             f"[rule] 触发 {event['rule_id']} {event.get('device_id')} {event['sensor']}="
@@ -215,8 +394,9 @@ def main() -> int:
             flush=True,
         )
         append_event(event)
-        if not post_event(backend, event):
+        if post_event(backend, event) != "ok":
             spool.save(event)
+        return True
 
     def on_message(client, userdata, msg):  # noqa: ANN001
         try:
@@ -236,7 +416,7 @@ def main() -> int:
         ts = now_iso()
         if persist:
             try:
-                db.insert_telemetry(db.DEFAULT_DB_PATH, ts, device, sensor, value,
+                db.insert_telemetry(DB_PATH, ts, device, sensor, value,
                                     reading.get("unit"), reading.get("scenario_id"))
             except Exception as exc:  # noqa: BLE001 - 落库失败不能拖垮判定
                 print(f"[rule] telemetry 落库失败：{exc}", flush=True)
@@ -250,10 +430,37 @@ def main() -> int:
         history[key].append((now, value))
 
         cooldown_key = f"{device}:{spec['rule_id']}"
-        if value > float(spec["threshold"]) and now - last_fired[cooldown_key] > cooldown:
-            last_fired[cooldown_key] = now
-            fire(make_event(device, sensor, value, spec, spec.get("event_type", "threshold_exceeded")), key)
+        threshold_value = float(spec["threshold"])
+
+        if value > threshold_value:
+            transition = tracker.observe(key, value, threshold_value, now)
+            if transition is None:
+                return  # 刷新窗口内：累计次数，不重复出事件
+            if transition["action"] == "start":
+                if now - last_fired[cooldown_key] <= cooldown:
+                    tracker.drop(key)  # 冷却期内不建新事件，也别留活动态
+                    return
+                last_fired[cooldown_key] = now
+                event = make_event(
+                    device, sensor, value, spec, spec.get("event_type", "threshold_exceeded")
+                )
+                if fire(event, key):
+                    tracker.attach(key, event["event_id"])
+                else:
+                    tracker.drop(key)  # 被 merge 抑制：别留一个指向空事件的活动态
+                return
+            # 持续越限：刷新同一条事件的“已持续 xx 秒 / 触发 N 次 / 峰值”
+            refresh_event(backend, transition.get("event_id"), aggregate_payload(transition, value, spec))
             return
+
+        # 未越限：如果之前在活动态，补一条“已恢复”
+        transition = tracker.observe(key, value, threshold_value, now)
+        if transition and transition["action"] == "clear":
+            refresh_event(
+                backend,
+                transition.get("event_id"),
+                aggregate_payload(transition, value, spec, cleared=True),
+            )
 
         trend = spec.get("trend") or {}
         if trend.get("enabled"):
@@ -272,6 +479,13 @@ def main() -> int:
                                 trend.get("event_type", "gas_surge"),
                                 trend.get("severity", "high"),
                                 trend["rule_id"],
+                                trigger={
+                                    "kind": "trend",
+                                    "delta": round(delta, 2),
+                                    "delta_threshold": float(trend["delta"]),
+                                    "window_s": int(trend_window),
+                                    "unit": spec.get("unit", ""),
+                                },
                             ),
                             key,
                         )
@@ -280,17 +494,17 @@ def main() -> int:
         while True:
             time.sleep(3600)
             try:
-                removed = db.purge_telemetry(db.DEFAULT_DB_PATH, retention)
+                removed = db.purge_telemetry(DB_PATH, retention)
                 if removed:
                     print(f"[rule] 清理过期遥测 {removed} 行", flush=True)
-                aged = db.purge_audit(db.DEFAULT_DB_PATH, retention_days=30)
+                aged = db.purge_audit(DB_PATH, retention_days=30)
                 if aged:
                     print(f"[rule] 清理 30 天前审计/事件 {aged} 行", flush=True)
             except Exception as exc:  # noqa: BLE001
                 print(f"[rule] 遥测清理失败：{exc}", flush=True)
 
-    db.purge_telemetry(db.DEFAULT_DB_PATH, retention)
-    db.purge_audit(db.DEFAULT_DB_PATH, retention_days=30)
+    db.purge_telemetry(DB_PATH, retention)
+    db.purge_audit(DB_PATH, retention_days=30)
     threading.Thread(target=housekeeping, name="telemetry-housekeeping", daemon=True).start()
 
     client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id="rule-engine")

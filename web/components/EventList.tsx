@@ -10,10 +10,15 @@ const SEVERITY: Record<string, { label: string; cls: string }> = {
 };
 
 const STATUS: Record<string, { label: string; cls: string }> = {
+  analyzing: { label: "分析中", cls: "border-sky-300 bg-sky-50 text-sky-700" },
+  awaiting_approval: { label: "待审批", cls: "border-amber-300 bg-amber-50 text-amber-800" },
+  // 老库遗留的中间态：当时无法区分“在算”和“等审批”，按待审批兼容
   pending: { label: "待审批", cls: "border-amber-300 bg-amber-50 text-amber-800" },
   approved: { label: "已批准", cls: "border-emerald-300 bg-emerald-50 text-emerald-700" },
   rejected: { label: "已拒绝", cls: "border-slate-300 bg-slate-100 text-slate-600" },
   superseded: { label: "已重提", cls: "border-slate-300 bg-slate-50 text-slate-500" },
+  // 历史遗留：DB 里挂着待审批，但检查点里的中断已经不在了（重启/清库后常见）
+  expired: { label: "已失效", cls: "border-slate-300 bg-slate-50 text-slate-400" },
   analysis_failed: { label: "分析失败", cls: "border-rose-300 bg-rose-50 text-rose-700" },
   graph_failed: { label: "执行失败", cls: "border-rose-300 bg-rose-50 text-rose-700" },
 };
@@ -23,6 +28,14 @@ function clock(iso?: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
   return date.toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+function duration(seconds?: number): string {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "—";
+  if (seconds < 60) return `${Math.round(seconds)} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分钟`;
 }
 
 function snapshots(event: RuleEvent): Array<[string, string]> {
@@ -102,6 +115,39 @@ export function EventCard({
           {observed.unit ?? ""}
         </span>
       </div>
+
+      {event.trigger ? (
+        <div className="mt-1 text-[10px] text-slate-500" data-testid="event-trigger">
+          {event.trigger.kind === "trend"
+            ? `触发依据：${event.trigger.window_s ?? 60}s 内上升 ${event.trigger.delta ?? "—"}${
+                event.trigger.unit ?? ""
+              } ≥ ${event.trigger.delta_threshold ?? "—"}${event.trigger.unit ?? ""}（趋势规则）`
+            : `触发依据：实测 ${event.trigger.value ?? "—"}${event.trigger.unit ?? ""} ≥ 限值 ${
+                event.trigger.threshold ?? "—"
+              }${event.trigger.unit ?? ""}`}
+        </div>
+      ) : null}
+
+      {event.aggregate ? (
+        <div className="mt-1 text-[10px]" data-testid="event-aggregate">
+          {event.aggregate.cleared ? (
+            <span className="text-emerald-600">
+              已恢复 · 持续 {duration(event.aggregate.sustained_s)}
+              {typeof event.aggregate.peak === "number"
+                ? ` · 峰值 ${event.aggregate.peak}${event.aggregate.unit ?? ""}`
+                : ""}
+            </span>
+          ) : (
+            <span className="text-rose-600">
+              持续 {duration(event.aggregate.sustained_s)}
+              {typeof event.aggregate.count === "number" ? ` · 触发 ${event.aggregate.count} 次` : ""}
+              {typeof event.aggregate.peak === "number"
+                ? ` · 峰值 ${event.aggregate.peak}${event.aggregate.unit ?? ""}`
+                : ""}
+            </span>
+          )}
+        </div>
+      ) : null}
 
       {rows.length > 0 ? (
         <div className="mt-1.5 flex flex-wrap gap-1">

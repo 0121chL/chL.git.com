@@ -5,8 +5,18 @@
  *   node scripts/browser_check.mjs --scenario gas_surge
  */
 import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
+
+
+function approverInvite() {
+  if (process.env.APPROVER_INVITE_CODE) return process.env.APPROVER_INVITE_CODE.trim();
+  try {
+    return readFileSync(new URL("../data/approver_invite.txt", import.meta.url), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
 
 const EDGE = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 const BACKEND = "http://127.0.0.1:8000";
@@ -23,7 +33,7 @@ const existingId = process.argv.includes("--event-id")
 /** 给注入脚本换一个服务账号的 token（/api/dev/inject 需要登录） */
 async function serviceToken() {
   const username = `svc${Date.now().toString().slice(-6)}`;
-  const body = JSON.stringify({ username, password: "test123456" });
+  const body = JSON.stringify({ username, password: "test123456", role: "approver", invite_code: approverInvite() });
   let res = await fetch(`${BACKEND}/api/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

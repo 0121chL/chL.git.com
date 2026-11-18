@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 
 import { login, register } from "@/lib/api";
 import { clearSession, getToken, saveSession } from "@/lib/auth";
+import { isApprover } from "@/lib/roles";
+import type { UserRole } from "@/lib/types";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -12,6 +14,8 @@ export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [role, setRole] = useState<UserRole>("engineer");
+  const [invite, setInvite] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -40,6 +44,10 @@ export default function LoginPage() {
         setError("两次输入的密码不一致");
         return;
       }
+      if (role === "approver" && !invite.trim()) {
+        setError("注册审批人需要邀请码（首次启动打印在后端控制台，也在 data/approver_invite.txt）");
+        return;
+      }
     }
 
     setBusy(true);
@@ -47,9 +55,10 @@ export default function LoginPage() {
       const result =
         mode === "login"
           ? await login(username.trim(), password)
-          : await register(username.trim(), password);
+          : await register(username.trim(), password, role, invite.trim());
       saveSession(result.token, result.user);
-      router.replace("/");
+      // 审批人进看板，工程师直接进自己的待办
+      router.replace(isApprover(result.user) ? "/" : "/todo");
       router.refresh();
     } catch (err) {
       clearSession();
@@ -122,6 +131,65 @@ export default function LoginPage() {
                 data-testid="confirm"
               />
             </label>
+          ) : null}
+
+          {mode === "register" ? (
+            <div>
+              <div className="mb-1 text-xs text-slate-500">注册身份</div>
+              <div className="grid grid-cols-2 gap-2">
+                {(
+                  [
+                    {
+                      value: "approver" as const,
+                      title: "审批人",
+                      desc: "看全部事件、审批、派单",
+                    },
+                    {
+                      value: "engineer" as const,
+                      title: "工程师",
+                      desc: "只看派给自己的工单",
+                    },
+                  ]
+                ).map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => setRole(option.value)}
+                    className={`rounded-lg border px-2 py-2 text-left transition-colors ${
+                      role === option.value
+                        ? "border-slate-900 bg-slate-900 text-white"
+                        : "border-slate-300 bg-white text-slate-700 hover:border-slate-400"
+                    }`}
+                    data-testid={`role-${option.value}`}
+                  >
+                    <div className="text-sm font-medium">{option.title}</div>
+                    <div
+                      className={`mt-0.5 text-[10px] ${
+                        role === option.value ? "text-slate-200" : "text-slate-500"
+                      }`}
+                    >
+                      {option.desc}
+                    </div>
+                  </button>
+                ))}
+              </div>
+              {role === "approver" ? (
+                <label className="mt-2 block text-xs text-slate-500">
+                  审批人邀请码
+                  <input
+                    value={invite}
+                    onChange={(e) => setInvite(e.target.value)}
+                    autoComplete="off"
+                    className="mt-1 w-full rounded border border-slate-300 px-2 py-2 font-mono text-sm tracking-wide text-slate-900 outline-none focus:border-slate-500"
+                    placeholder="XXXX-XXXX"
+                    data-testid="invite"
+                  />
+                </label>
+              ) : null}
+              <p className="mt-1 text-[10px] text-slate-400">
+                审批人只能由本人注册，系统不会自动生成审批人账号。
+              </p>
+            </div>
           ) : null}
 
           {error ? (

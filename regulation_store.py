@@ -185,6 +185,19 @@ def clause_ids() -> list[str]:
     return [c["clause_id"] for c in REGULATIONS]
 
 
+def warmup() -> bool:
+    """预建向量索引（首次会加载 embedding 模型）。
+
+    后端启动时在后台线程里调一次，避免第一条事件才现场加载、把规则卡拖慢几秒。
+    失败返回 False —— 调用方不应把它当致命错误（还有 BM25 词法兜底）。
+    """
+    try:
+        search_regulation("甲烷 温度 振动 安全规程", top_k=1)
+        return True
+    except Exception:  # noqa: BLE001 - 预热失败不影响功能
+        return False
+
+
 # --------------------------------------------------------------------------- #
 # 向量索引（懒加载，进程内单例）
 # --------------------------------------------------------------------------- #
@@ -214,6 +227,11 @@ def _build_index():
     _CLAUSE_IDS = [c["clause_id"] for c in REGULATIONS]
 
 
+def ready() -> bool:
+    """向量索引是否已建好（预热完成）。没建好时走纯词法，避免首条事件等模型加载。"""
+    return _INDEX is not None
+
+
 def search_regulation(query: str, top_k: int = 3, mode: str | None = None) -> list[dict[str, Any]]:
     """返回 top-k 规程片段：[{clause_id, title, text, topic, score, vector_score, lexical_score}]。
 
@@ -222,6 +240,7 @@ def search_regulation(query: str, top_k: int = 3, mode: str | None = None) -> li
         all-MiniLM-L6-v2 是英文模型，对中文条款的纯语义排序接近随机（实测 top-1 常错），
         所以用词法分补偿；换成多语言 embedding 时可设 mode="vector"。
       - "vector"：纯 FAISS 语义检索。
+      - "lexical"：纯 BM25，不触发模型加载（后端"规则处置卡"冷启动时用）。
     """
     if not query or not query.strip():
         raise ValueError("query 不能为空")
@@ -230,22 +249,30 @@ def search_regulation(query: str, top_k: int = 3, mode: str | None = None) -> li
 
     mode = mode or os.environ.get("REGULATION_RETRIEVAL", "hybrid")
 
-    with _LOCK:
-        _build_index()
-        import numpy as np
+    vector_scores: dict[int, float] = {}
+    if mode != "lexical":
+        with _LOCK:
+            _build_index()
+            import numpy as np
 
-        q = _model().encode([query], normalize_embeddings=True, convert_to_numpy=True)
-        q = np.asarray(q, dtype="float32")
-        scores, idxs = _INDEX.search(q, len(_CLAUSE_IDS))
+            q = _model().encode([query], normalize_embeddings=True, convert_to_numpy=True)
+            q = np.asarray(q, dtype="float32")
+            scores, idxs = _INDEX.search(q, len(_CLAUSE_IDS))
 
-    vector_scores = {int(i): float(s) for s, i in zip(scores[0], idxs[0]) if i >= 0}
-    lexical = _bm25_scores(query) if mode == "hybrid" else {}
+        vector_scores = {int(i): float(s) for s, i in zip(scores[0], idxs[0]) if i >= 0}
+
+    lexical = _bm25_scores(query) if mode in ("hybrid", "lexical") else {}
 
     hits: list[dict[str, Any]] = []
     for i, clause in enumerate(REGULATIONS):
         vector_score = vector_scores.get(i, 0.0)
         lexical_score = lexical.get(i, 0.0)
-        score = vector_score if mode == "vector" else 0.35 * vector_score + 0.65 * lexical_score
+        if mode == "vector":
+            score = vector_score
+        elif mode == "lexical":
+            score = lexical_score
+        else:
+            score = 0.35 * vector_score + 0.65 * lexical_score
         hits.append(
             {
                 "clause_id": clause["clause_id"],

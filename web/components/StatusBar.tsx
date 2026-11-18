@@ -1,5 +1,9 @@
 "use client";
 
+import Link from "next/link";
+
+import { NotificationBell } from "@/components/NotificationBell";
+import { roleLabel } from "@/lib/roles";
 import type { StatusPayload } from "@/lib/types";
 
 const ANALYZER_LABEL: Record<string, { text: string; tone: "ok" | "warn" }> = {
@@ -43,12 +47,14 @@ export function StatusBar({
   sseConnected,
   lastError,
   username,
+  role,
   onSignOut,
 }: {
   status: StatusPayload | null;
   sseConnected: boolean;
   lastError: string | null;
   username: string;
+  role?: string | null;
   onSignOut: () => void;
 }) {
   const mqtt = status?.mqtt;
@@ -110,6 +116,29 @@ export function StatusBar({
             <span className="text-xs text-slate-600" data-testid="current-user">
               {username}
             </span>
+            {role ? (
+              <span
+                className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-slate-500"
+                data-testid="current-role"
+              >
+                {roleLabel(role)}
+              </span>
+            ) : null}
+            <Link
+              href="/todo"
+              className="rounded border border-slate-300 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+              data-testid="open-todo"
+            >
+              我的待办
+            </Link>
+            <NotificationBell />
+            <Link
+              href="/settings"
+              className="rounded border border-slate-300 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+              data-testid="open-settings"
+            >
+              设置
+            </Link>
             <button
               type="button"
               onClick={onSignOut}

@@ -10,7 +10,8 @@ param(
     [ValidateSet("offline", "local", "ollama", "auto")]
     [string]$Backend = "offline",
     [switch]$Check,
-    [switch]$NoSimulator
+    [switch]$NoSimulator,
+    [switch]$Hardware
 )
 
 $ErrorActionPreference = "Stop"
@@ -118,20 +119,23 @@ if (-not (Wait-Http "http://127.0.0.1:8000/api/status" 40)) {
 }
 Write-Host "  [就绪] http://127.0.0.1:8000" -ForegroundColor Green
 
-# 3) 规则引擎
-$rule = Start-Process -FilePath $Python -ArgumentList "-X", "utf8", "-u", "rule_engine.py" `
+# 3) 规则引擎（-Hardware 时改用只含 ch4/temp/vibration 的那套阈值）
+$rulesFile = if ($Hardware) { "config\rules.hardware.json" } else { "config\rules.json" }
+$rule = Start-Process -FilePath $Python -ArgumentList @("-X", "utf8", "-u", "rule_engine.py", "--rules", $rulesFile) `
     -WorkingDirectory $Root -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $LogDir "rule_engine.log") -RedirectStandardError (Join-Path $LogDir "rule_engine.err")
 $pids["rule_engine"] = $rule.Id
-Write-Host "  [启动] rule_engine（订阅 line1/telemetry）" -ForegroundColor Green
+Write-Host "  [启动] rule_engine（订阅 line1/telemetry，规则=$rulesFile）" -ForegroundColor Green
 
-# 4) 传感器
-if (-not $NoSimulator) {
+# 4) 传感器（-Hardware 模式等真实板子上报，不起仿真器）
+if (-not $NoSimulator -and -not $Hardware) {
     $sim = Start-Process -FilePath $Python -ArgumentList "-X", "utf8", "-u", "sensor_simulator.py" `
         -WorkingDirectory $Root -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $LogDir "simulator.log") -RedirectStandardError (Join-Path $LogDir "simulator.err")
     $pids["sensor_simulator"] = $sim.Id
     Write-Host "  [启动] sensor_simulator（1 Hz + 心跳）" -ForegroundColor Green
+} elseif ($Hardware) {
+    Write-Host "  [跳过] 仿真器：等 ESP32-S3 上报（config/hardware.json 里的 device_id）" -ForegroundColor Yellow
 }
 
 # 5) 前端
@@ -158,6 +162,12 @@ Write-Host "  sensor_simulator 1 Hz + 心跳"
 Write-Host "  看板             http://localhost:3000"
 Write-Host ""
 Write-Host "  现场触发：demo_trigger.cmd   （注入 ch4_rise）" -ForegroundColor Yellow
+if ($Hardware) {
+    Write-Host ""
+    Write-Host "  硬件模式：规则 = config\rules.hardware.json（只有 ch4 / temp / vibration）" -ForegroundColor Cyan
+    Write-Host "  自检板子：python scripts\hw_check.py --live" -ForegroundColor Cyan
+    Write-Host "  标定 MQ-4：python scripts\hw_check.py --calibrate --seconds 60" -ForegroundColor Cyan
+}
 Write-Host "  停止全部：STOP.cmd" -ForegroundColor Yellow
 Write-Host ""
 

@@ -1,0 +1,13 @@
+{
+  "_comment": "SLA（分钟）：按事件严重度分级。approval=待审批时限，handle=工单处置时限（从批准时间起算）。改完重启后端生效。",
+  "approval": {
+    "high": 5,
+    "medium": 30,
+    "low": 120
+  },
+  "handle": {
+    "high": 30,
+    "medium": 240,
+    "low": 1440
+  }
+}

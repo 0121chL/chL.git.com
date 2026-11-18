@@ -1,0 +1,46 @@
+{
+  "_comment": "真实硬件（ESP32-S3 + MQ-4 + DS18B20 + MPU6050）用的规则配置。阈值仍是规程值，只把节奏调快以适应桌面演示；只有 ch4/temp/vibration 三个测点，co 与 airflow 需要另加探头。",
+  "backend": "http://127.0.0.1:8000",
+  "cooldown_s": 15,
+  "trend_window_s": 60,
+  "merge_window_s": 5,
+  "refresh_s": 30,
+  "telemetry": {
+    "persist": true,
+    "retention_hours": 48
+  },
+  "spool": {
+    "dir": "data/spool",
+    "retry_interval_s": 5
+  },
+  "sensors": {
+    "ch4": {
+      "rule_id": "R-CH4-HIGH",
+      "threshold": 1.0,
+      "unit": "%",
+      "severity": "high",
+      "event_type": "threshold_exceeded",
+      "trend": {
+        "enabled": true,
+        "delta": 0.5,
+        "rule_id": "R-CH4-RISE",
+        "severity": "high",
+        "event_type": "gas_surge"
+      }
+    },
+    "temp": {
+      "rule_id": "R-TEMP-HIGH",
+      "threshold": 85.0,
+      "unit": "C",
+      "severity": "high",
+      "event_type": "threshold_exceeded"
+    },
+    "vibration": {
+      "rule_id": "R-VIB-HIGH",
+      "threshold": 4.5,
+      "unit": "mm/s",
+      "severity": "medium",
+      "event_type": "threshold_exceeded"
+    }
+  }
+}
